@@ -1,0 +1,35 @@
+# Secrets
+.env
+.env.save
+.env.local
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Large files
+stg.pdf
+
+# Build/ingestion artifacts
+enrichment_report.json
+enrichment_report_resume.json
+enrichment_test_5.json
+ingestion_progress.json
+ingestion_quality_report.json
+ingestion_quality_report_summary.txt
+qa_vignette_results.json
+dry_run_extractions/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
