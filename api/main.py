@@ -149,19 +149,12 @@ async def analyze_complaint(request: AnalyzeRequest):
         vitals = request.vitals.model_dump(exclude_none=True) if request.vitals else None
         core_history = request.core_history.model_dump(exclude_none=True) if request.core_history else None
 
-        # Run triage agent
+        # Run triage agent (includes safety review internally, parallelized)
         result = await app.state.agent.analyze(
             complaint=request.complaint,
             patient=patient,
             vitals=vitals,
             core_history=core_history,
-        )
-
-        # Safety review
-        result = await app.state.safety.check(
-            result,
-            complaint=request.complaint,
-            patient=patient,
         )
 
         return result

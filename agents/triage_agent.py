@@ -13,6 +13,7 @@ Agent loop:
            → Sonnet synthesises final JSON matching frontend contract
 """
 
+import asyncio
 import json
 import logging
 import anthropic
@@ -49,70 +50,16 @@ After calling all tools, provide a brief clinical summary of your findings.
 """
 
 
-SYNTHESIS_PROMPT = """Based on the triage analysis below, produce a JSON response matching this exact schema.
+SYNTHESIS_PROMPT = """Produce triage JSON from this data. Use ONLY verified conditions.
 
-## Input
-Complaint: {complaint}
-Patient: {patient}
-Vitals: {vitals}
-Core history: {core_history}
+Complaint: {complaint} | Patient: {patient} | Vitals: {vitals}
+Conditions found: {verified_conditions}
+Safety: {safety_data}
 
-## Tool Results
-{tool_results}
+Return JSON:
+{{"extracted_symptoms":["terms"],"acuity":"routine|priority|urgent","acuity_reasons":["reason"],"acuity_sources":["STG X.Y"],"conditions":[{{"condition_code":"stg_code","condition_name":"exact name","confidence":0.85,"matched_symptoms":["syms"],"reasoning":"why","source_references":["STG X.Y"]}}],"condition_symptoms":{{"name":[{{"id":"id","question":"Q?"}}]}},"needs_assessment":true,"assessment_questions":[{{"id":"hyp_code_1","question":"Q?","type":"yes_no","required":false,"round":1,"source_citation":"STG X.Y","grounding":"verified"}}]}}
 
-## VERIFIED CONDITIONS (from the database — use ONLY these)
-{verified_conditions}
-
-## Required JSON Schema
-Return a JSON object with these exact fields:
-{{
-  "extracted_symptoms": ["list of clinical terms identified"],
-  "acuity": "routine" | "priority" | "urgent",
-  "acuity_reasons": ["reasons for acuity level"],
-  "acuity_sources": ["use ONLY references from the verified conditions list above"],
-  "conditions": [
-    {{
-      "condition_code": "MUST be a stg_code from the verified list above",
-      "condition_name": "MUST be the exact name from the verified list above",
-      "confidence": 0.85,
-      "matched_symptoms": ["symptoms that matched"],
-      "reasoning": "why this condition fits",
-      "source_references": ["MUST use format 'STG <stg_code>' from verified list ONLY"]
-    }}
-  ],
-  "condition_symptoms": {{
-    "condition name": [
-      {{"id": "unique_id", "question": "Do you have X?"}}
-    ]
-  }},
-  "needs_assessment": true,
-  "assessment_questions": [
-    {{
-      "id": "unique_question_id",
-      "question": "targeted follow-up question",
-      "type": "yes_no",
-      "required": false,
-      "round": 1,
-      "source_citation": "STG <stg_code> from verified list, or empty string if not traceable",
-      "grounding": "verified"
-    }}
-  ]
-}}
-
-CRITICAL — CITATION RULES:
-- You may ONLY cite condition_code values that appear in the VERIFIED CONDITIONS list
-- You may ONLY use condition_name values that appear in the VERIFIED CONDITIONS list
-- source_references MUST use the format "STG <stg_code>" where stg_code is from the verified list
-- source_citation on questions MUST reference a verified stg_code, or be an empty string
-- Do NOT invent STG section numbers, page numbers, or condition names not in the verified list
-- Do NOT add descriptive suffixes to STG codes (e.g. "STG 11.1" is correct, "STG Section 11.1 – Tonsillitis" is NOT)
-- acuity_sources: use "STG <stg_code>" for condition-derived reasons, "Standard: vital signs assessment" for vitals-derived reasons
-- confidence is 0.0 to 1.0 (not percentage)
-- acuity must be lowercase: "routine", "priority", or "urgent"
-- Generate 3-5 discriminating assessment questions
-- Each assessment question id should be unique like "hyp_conditioncode_1"
-- grounding: "verified" if traceable to a verified stg_code, "unverified" otherwise
-- Return ONLY valid JSON, no markdown fences or explanation
+Rules: condition_code/condition_name MUST be from the verified list. source_references format "STG X.Y". confidence 0-1. 3-5 assessment questions. Return ONLY valid JSON.
 """
 
 
@@ -279,33 +226,59 @@ class TriageAgent:
         top_names = [f"{c.get('name','')} ({c.get('adjusted_score',0):.3f})" for c in conditions[:5]]
         logger.info(f"[{time.monotonic()-t0:.1f}s] Found {len(conditions)} conditions: {top_names}")
 
-        # 2c. Check safety flags
+        # 2c. Parallel: safety flags + condition details + vitals acuity
         condition_ids = [c["id"] for c in conditions[:15]]
-        if condition_ids:
-            safety_result = await TOOL_HANDLERS["check_safety_flags"](
-                {"symptoms": expanded_terms, "condition_ids": condition_ids,
-                 "vitals": vitals or {}},
-                self.pool,
-            )
-            tool_results["check_safety_flags"] = safety_result
-        logger.info(f"[{time.monotonic()-t0:.1f}s] Safety flags checked")
+        top_ids = [c["id"] for c in conditions[:5]]
 
-        # 2d. Compute vitals-based acuity directly (no LLM needed)
+        async def _get_safety():
+            if not condition_ids:
+                return {}
+            return await TOOL_HANDLERS["check_safety_flags"](
+                {"symptoms": expanded_terms, "condition_ids": condition_ids,
+                 "vitals": vitals or {}}, self.pool)
+
+        async def _get_details():
+            details = {}
+            for cid in top_ids:
+                d = await TOOL_HANDLERS["get_condition_detail"](
+                    {"condition_id": cid}, self.pool)
+                details[cid] = d
+            return details
+
+        safety_result, details = await asyncio.gather(_get_safety(), _get_details())
+        tool_results["check_safety_flags"] = safety_result
+        tool_results["condition_details"] = details
         acuity_info = self._compute_vitals_acuity(vitals or {})
         tool_results["vitals_acuity"] = acuity_info
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Safety + details done (parallel)")
 
-        # 2e. Get detail for top 5 conditions (from search scores, not re-scored)
-        top_ids = [c["id"] for c in conditions[:5]]
-        for cid in top_ids:
-            detail = await TOOL_HANDLERS["get_condition_detail"](
-                {"condition_id": cid}, self.pool
-            )
-            tool_results["get_condition_detail"] = detail
-        logger.info(f"[{time.monotonic()-t0:.1f}s] Got condition details")
+        # ── Step 3: Synthesis + safety review in parallel ────────────────
+        synthesis_task = asyncio.create_task(
+            self._synthesize_analyze(complaint, patient, vitals, core_history, tool_results)
+        )
+        safety_review_task = asyncio.create_task(
+            self._run_safety_review(complaint, patient, symptoms, conditions, acuity_info)
+        )
+        result, safety_review = await asyncio.gather(synthesis_task, safety_review_task)
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Synthesis + safety done (parallel)")
 
-        # ── Step 3: Synthesise with Sonnet (single LLM call) ─────────────
-        result = await self._synthesize_analyze(complaint, patient, vitals, core_history, tool_results)
-        logger.info(f"[{time.monotonic()-t0:.1f}s] Analysis complete")
+        # Merge safety review into result
+        if safety_review and not safety_review.get("safe", True):
+            result["safety_review"] = {
+                "concerns": safety_review.get("concerns", []),
+                "missing_conditions": safety_review.get("missing_conditions", []),
+                "reviewed": True,
+            }
+            corrected = safety_review.get("corrected_acuity")
+            if corrected:
+                acuity_rank = {"routine": 0, "priority": 1, "urgent": 2}
+                if acuity_rank.get(corrected, 0) > acuity_rank.get(result.get("acuity", "routine"), 0):
+                    result["acuity"] = corrected
+                    result.setdefault("acuity_reasons", []).append(
+                        f"Safety review escalated: {'; '.join(safety_review.get('concerns', []))}"
+                    )
+                    result.setdefault("acuity_sources", []).append("Safety reviewer")
+
         return result
 
     # ── Refine endpoint ──────────────────────────────────────────────────────
@@ -425,6 +398,39 @@ class TriageAgent:
         return result
 
     # ── Private helpers ──────────────────────────────────────────────────────
+
+    async def _run_safety_review(self, complaint, patient, symptoms, conditions, acuity_info):
+        """Run safety review concurrently with synthesis using search results."""
+        conditions_summary = [
+            {"name": c.get("name", ""), "score": c.get("adjusted_score", 0)}
+            for c in conditions[:5]
+        ]
+        review_input = json.dumps({
+            "complaint": complaint,
+            "patient": patient or {},
+            "acuity": acuity_info.get("acuity", "routine"),
+            "extracted_symptoms": symptoms,
+            "conditions": conditions_summary,
+        }, default=str)
+        try:
+            response = self.client.messages.create(
+                model=self.haiku,
+                max_tokens=512,
+                temperature=0,
+                system=(
+                    "Review triage for safety. Check for: missed red flags, dangerous omissions, "
+                    "acuity appropriateness. Return JSON: {\"safe\":true} or "
+                    "{\"safe\":false,\"concerns\":[\"...\"],\"corrected_acuity\":\"urgent\",\"missing_conditions\":[\"...\"]}"
+                ),
+                messages=[{"role": "user", "content": review_input}],
+            )
+            text = response.content[0].text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            return json.loads(text)
+        except Exception as e:
+            logger.warning(f"Safety review error: {e}")
+            return {"safe": True}
 
     @staticmethod
     def _compute_vitals_acuity(vitals: dict) -> dict:
@@ -605,53 +611,35 @@ class TriageAgent:
         return result
 
     async def _synthesize_analyze(self, complaint, patient, vitals, core_history, tool_results):
-        """Use Sonnet to produce the final AnalyzeResponse-shaped JSON."""
+        """Use Haiku to produce the final AnalyzeResponse-shaped JSON."""
         # Build verified conditions lookup from DB-sourced tool results
         verified = self._extract_verified_conditions(tool_results)
         verified_text = "\n".join(
-            f"- stg_code: {v['stg_code']}, name: {v['name']}, chapter: {v.get('chapter', '')}"
+            f"- {v['stg_code']}: {v['name']}"
             for v in verified.values()
-        ) or "No conditions found in database."
+        ) or "No conditions found."
 
-        # Clean tool_results for the prompt (trim overly large entries)
-        clean_results = {}
-        for k, v in tool_results.items():
-            if k == "_agent_summary":
-                clean_results[k] = v
-                continue
-            serialised = json.dumps(v, default=str)
-            if len(serialised) > 4000:
-                # Truncate large results by trimming list contents rather than raw string slice
-                if isinstance(v, dict):
-                    trimmed = {}
-                    for dk, dv in v.items():
-                        dv_str = json.dumps(dv, default=str)
-                        if len(dv_str) > 2000:
-                            if isinstance(dv, list):
-                                trimmed[dk] = dv[:10]  # keep first 10 items
-                            else:
-                                trimmed[dk] = str(dv)[:500] + "...(truncated)"
-                        else:
-                            trimmed[dk] = dv
-                    clean_results[k] = trimmed
-                else:
-                    clean_results[k] = v
-            else:
-                clean_results[k] = v
+        # Build compact safety summary
+        safety = tool_results.get("check_safety_flags", {})
+        vitals_acuity = tool_results.get("vitals_acuity", {})
+        safety_data = json.dumps({
+            "red_flags": safety.get("red_flags_triggered", []),
+            "vitals_acuity": vitals_acuity.get("acuity", "routine"),
+            "vitals_reasons": vitals_acuity.get("reasons", []),
+        }, default=str)
 
         prompt = SYNTHESIS_PROMPT.format(
             complaint=complaint,
-            patient=json.dumps(patient) if patient else "Not provided",
-            vitals=json.dumps(vitals) if vitals else "Not provided",
-            core_history=json.dumps(core_history) if core_history else "Not provided",
-            tool_results=json.dumps(clean_results, indent=2, default=str),
+            patient=json.dumps(patient) if patient else "none",
+            vitals=json.dumps(vitals) if vitals else "none",
             verified_conditions=verified_text,
+            safety_data=safety_data,
         )
 
         try:
             response = self.client.messages.create(
                 model=self.haiku,
-                max_tokens=4096,
+                max_tokens=2048,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
