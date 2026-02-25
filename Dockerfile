@@ -17,4 +17,4 @@ COPY db/database.py db/database.py
 ENV PORT=8000
 EXPOSE $PORT
 
-CMD uvicorn api.main:app --host 0.0.0.0 --port ${PORT}
+CMD ["/bin/sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
