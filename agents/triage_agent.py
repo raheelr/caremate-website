@@ -289,14 +289,24 @@ class TriageAgent:
                         result.setdefault("acuity_reasons", []).append(concern)
                     result.setdefault("acuity_sources", []).append("Safety reviewer")
 
-        # ── Add structured STG guidelines for each condition ───────────
+        # ── Override extracted_symptoms with step 1 results ─────────
+        # The synthesis LLM may add vitals interpretations to extracted_symptoms.
+        # Use the actual symptom extraction from step 1 instead.
+        result["extracted_symptoms"] = symptoms
+
+        # ── Add structured STG guidelines only for conditions in result ────
         # Uses condition details already fetched in step 2c — no extra DB calls
+        final_codes = {c.get("condition_code") for c in result.get("conditions", [])}
         stg_guidelines = {}
         for cid, detail in details.items():
             if detail.get("error"):
                 continue
             name = detail.get("name", "")
             stg_code = detail.get("stg_code", "")
+
+            # Only include STG data for conditions that made it to the final result
+            if stg_code not in final_codes:
+                continue
 
             # Parse medicines into clean list
             meds = detail.get("medicines", [])
