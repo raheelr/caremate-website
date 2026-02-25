@@ -175,7 +175,7 @@ class TriageAgent:
             vitals_context = ", ".join(f"{k}={v}" for k, v in vitals.items() if v is not None)
 
         extract_prompt = (
-            f"Extract symptoms from this complaint. For EACH symptom, include BOTH the "
+            f"Extract SYMPTOMS from this complaint. For EACH symptom, include BOTH the "
             f"common/patient-friendly term AND the formal clinical term.\n\n"
             f"Examples:\n"
             f"- 'sore throat' AND 'pharyngitis'\n"
@@ -183,10 +183,12 @@ class TriageAgent:
             f"- 'stiff neck' AND 'neck stiffness' AND 'nuchal rigidity'\n"
             f"- 'burning when urinating' AND 'dysuria'\n"
             f"- 'throwing up' AND 'vomiting'\n\n"
+            f"IMPORTANT: Only extract SYMPTOMS (what the patient feels/reports). "
+            f"Do NOT include vital sign readings (blood pressure, heart rate, temperature values, "
+            f"SpO2, respiratory rate). Vitals are recorded separately.\n\n"
             f"Complaint: {complaint}\n"
-            f"{patient_context}\n"
-            f"{'Vitals: ' + vitals_context if vitals_context else ''}\n\n"
-            f"Return ONLY a flat JSON array with ALL terms (both common and clinical), "
+            f"{patient_context}\n\n"
+            f"Return ONLY a flat JSON array with ALL symptom terms (both common and clinical), "
             f"e.g. [\"sore throat\", \"pharyngitis\", \"fever\", \"high temperature\"]"
         )
 
@@ -265,7 +267,7 @@ class TriageAgent:
             self._synthesize_analyze(complaint, patient, vitals, core_history, tool_results)
         )
         safety_review_task = asyncio.create_task(
-            self._run_safety_review(complaint, patient, symptoms, conditions, acuity_info)
+            self._run_safety_review(complaint, patient, symptoms, conditions, acuity_info, vitals)
         )
         result, safety_review = await asyncio.gather(synthesis_task, safety_review_task)
         logger.info(f"[{time.monotonic()-t0:.1f}s] Synthesis + safety done (parallel)")
@@ -286,6 +288,47 @@ class TriageAgent:
                     for concern in safety_review.get("concerns", [])[:3]:
                         result.setdefault("acuity_reasons", []).append(concern)
                     result.setdefault("acuity_sources", []).append("Safety reviewer")
+
+        # ── Add structured STG guidelines for each condition ───────────
+        # Uses condition details already fetched in step 2c — no extra DB calls
+        stg_guidelines = {}
+        for cid, detail in details.items():
+            if detail.get("error"):
+                continue
+            name = detail.get("name", "")
+            stg_code = detail.get("stg_code", "")
+
+            # Parse medicines into clean list
+            meds = detail.get("medicines", [])
+            medicine_list = []
+            for m in (meds if isinstance(meds, list) else []):
+                med_entry = {
+                    "name": m.get("name", ""),
+                    "treatment_line": m.get("treatment_line", ""),
+                    "dose": m.get("dose_context", ""),
+                    "special_notes": m.get("special_notes", ""),
+                }
+                if med_entry["name"]:
+                    medicine_list.append(med_entry)
+
+            # Parse referral criteria
+            referral = detail.get("referral_criteria", [])
+            if isinstance(referral, str):
+                try:
+                    referral = json.loads(referral)
+                except (json.JSONDecodeError, TypeError):
+                    referral = [referral] if referral else []
+
+            stg_guidelines[name] = {
+                "stg_code": stg_code,
+                "description": detail.get("description", ""),
+                "general_measures": detail.get("general_measures", ""),
+                "danger_signs": detail.get("danger_signs", ""),
+                "medicines": medicine_list,
+                "referral_criteria": referral,
+                "source_pages": detail.get("source_pages", []),
+            }
+        result["stg_guidelines"] = stg_guidelines
 
         return result
 
@@ -407,7 +450,7 @@ class TriageAgent:
 
     # ── Private helpers ──────────────────────────────────────────────────────
 
-    async def _run_safety_review(self, complaint, patient, symptoms, conditions, acuity_info):
+    async def _run_safety_review(self, complaint, patient, symptoms, conditions, acuity_info, vitals=None):
         """Run safety review concurrently with synthesis using search results."""
         conditions_summary = [
             {"name": c.get("name", ""), "score": c.get("adjusted_score", 0)}
@@ -416,7 +459,9 @@ class TriageAgent:
         review_input = json.dumps({
             "complaint": complaint,
             "patient": patient or {},
+            "vitals": vitals or {},
             "acuity": acuity_info.get("acuity", "routine"),
+            "acuity_reasons": acuity_info.get("reasons", []),
             "extracted_symptoms": symptoms,
             "conditions": conditions_summary,
         }, default=str)
