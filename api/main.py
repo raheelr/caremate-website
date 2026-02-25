@@ -227,6 +227,7 @@ async def enrich_presentation(request: EnrichRequest):
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=2048,
+            temperature=0,
             messages=[{"role": "user", "content": (
                 f"Given this STG guideline data, generate clinical management prompts.\n\n"
                 f"{stg_context}\n\n"
@@ -286,6 +287,7 @@ async def query_rag(request: RAGQueryRequest):
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=2048,
+            temperature=0,
             messages=[{"role": "user", "content": (
                 f"Answer this clinical query using ONLY the provided STG guideline context. "
                 f"Reference sources with [Source N] notation.\n\n"
@@ -379,6 +381,7 @@ async def suggest_dosing(request: DosingRequest):
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
+            temperature=0,
             messages=[{"role": "user", "content": (
                 f"From the STG text below, provide dosing for {request.drugName} "
                 f"for {request.conditionName}.\n"

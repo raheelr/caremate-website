@@ -19,7 +19,7 @@ import anthropic
 import asyncpg
 from typing import Optional
 
-from agents.tools import TOOL_DEFINITIONS, TOOL_HANDLERS
+from agents.tools import TOOL_HANDLERS
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,6 @@ class TriageAgent:
         self.pool = pool
         self.haiku = "claude-haiku-4-5-20251001"
         self.sonnet = "claude-sonnet-4-6"
-        self.max_iterations = 8
 
     # ── Main analyse endpoint ────────────────────────────────────────────────
 
@@ -193,68 +192,121 @@ class TriageAgent:
     ) -> dict:
         """
         Run full triage analysis. Returns AnalyzeResponse-shaped dict.
-        1. Haiku tool_use loop (extract → expand → search → score → check → detail)
-        2. Sonnet synthesises structured JSON
+
+        Pipeline (3 LLM calls, rest are direct DB queries):
+        1. Haiku: extract symptoms from complaint (temperature=0)
+        2. DB: expand_synonyms → search_conditions → score → safety → detail
+        3. Sonnet: synthesise final JSON (temperature=0)
         """
-        user_message = self._build_analyze_prompt(complaint, patient, vitals, core_history)
-        messages = [{"role": "user", "content": user_message}]
-        tool_results = {}
+        import time
+        t0 = time.monotonic()
 
-        # ── Agent loop with Haiku ────────────────────────────────────────────
-        for iteration in range(self.max_iterations):
-            try:
-                response = self.client.messages.create(
-                    model=self.haiku,
-                    max_tokens=4096,
-                    system=SYSTEM_PROMPT,
-                    tools=TOOL_DEFINITIONS,
-                    messages=messages,
-                )
-            except anthropic.APIError as e:
-                logger.error(f"Anthropic API error on iteration {iteration}: {e}")
-                break
+        # ── Step 1: Extract symptoms with Haiku (single LLM call) ─────────
+        patient_context = ""
+        is_child = False
+        is_pregnant = False
+        if patient:
+            age = patient.get("age")
+            sex = patient.get("sex", "unknown")
+            preg = patient.get("pregnancy_status", "unknown")
+            patient_context = f"Patient: age {age}, sex {sex}, pregnancy: {preg}"
+            if age and age < 12:
+                is_child = True
+            if preg == "pregnant":
+                is_pregnant = True
 
-            if response.stop_reason == "tool_use":
-                assistant_content = response.content
-                tool_result_blocks = []
+        vitals_context = ""
+        if vitals:
+            vitals_context = ", ".join(f"{k}={v}" for k, v in vitals.items() if v is not None)
 
-                for block in assistant_content:
-                    if block.type == "tool_use":
-                        tool_name = block.name
-                        tool_input = block.input
-                        tool_use_id = block.id
+        extract_prompt = (
+            f"Extract standardised clinical symptoms from this complaint. "
+            f"Return specific clinical terms (e.g. 'dysuria', 'pharyngitis', 'productive cough'), "
+            f"not vague terms like 'pain' or 'feeling unwell'.\n\n"
+            f"Complaint: {complaint}\n"
+            f"{patient_context}\n"
+            f"{'Vitals: ' + vitals_context if vitals_context else ''}\n\n"
+            f"Return ONLY a JSON array of clinical terms, e.g. [\"pharyngitis\", \"fever\"]"
+        )
 
-                        logger.info(f"Tool call [{iteration}]: {tool_name}")
+        try:
+            extract_response = self.client.messages.create(
+                model=self.haiku,
+                max_tokens=512,
+                temperature=0,
+                messages=[{"role": "user", "content": extract_prompt}],
+            )
+            raw = extract_response.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            symptoms = json.loads(raw)
+            if not isinstance(symptoms, list):
+                symptoms = [str(symptoms)]
+            symptoms = [s.lower().strip() for s in symptoms if s.strip()]
+        except Exception as e:
+            logger.error(f"Symptom extraction failed: {e}")
+            # Fallback: use complaint words
+            symptoms = [w.lower().strip() for w in complaint.split() if len(w) > 3]
 
-                        handler = TOOL_HANDLERS.get(tool_name)
-                        if handler:
-                            try:
-                                result = await handler(tool_input, self.pool)
-                            except Exception as e:
-                                logger.error(f"Tool {tool_name} failed: {e}")
-                                result = {"error": str(e)}
-                        else:
-                            result = {"error": f"Unknown tool: {tool_name}"}
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Extracted symptoms: {symptoms}")
+        tool_results = {
+            "extract_symptoms": {"symptoms": symptoms, "count": len(symptoms)},
+        }
 
-                        tool_results[tool_name] = result
-                        tool_result_blocks.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": json.dumps(result, default=str),
-                        })
+        # ── Step 2: Direct DB calls (no LLM needed) ──────────────────────
+        # 2a. Expand synonyms
+        expand_result = await TOOL_HANDLERS["expand_synonyms"](
+            {"clinical_terms": symptoms}, self.pool
+        )
+        tool_results["expand_synonyms"] = expand_result
+        expanded_terms = expand_result.get("expanded_terms", symptoms)
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Expanded to {len(expanded_terms)} terms")
 
-                messages.append({"role": "assistant", "content": assistant_content})
-                messages.append({"role": "user", "content": tool_result_blocks})
+        # 2b. Search conditions
+        search_result = await TOOL_HANDLERS["search_conditions"](
+            {"symptoms": expanded_terms, "original_symptoms": symptoms,
+             "patient_is_child": is_child, "patient_is_pregnant": is_pregnant},
+            self.pool,
+        )
+        tool_results["search_conditions"] = search_result
+        conditions = search_result.get("conditions", [])
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Found {len(conditions)} conditions")
 
-            elif response.stop_reason == "end_turn":
-                # Claude finished — capture any final text
-                for block in response.content:
-                    if hasattr(block, "text"):
-                        tool_results["_agent_summary"] = block.text
-                break
+        # 2c. Score differential
+        condition_ids = [c["id"] for c in conditions[:15]]
+        if condition_ids:
+            score_result = await TOOL_HANDLERS["score_differential"](
+                {"condition_ids": condition_ids, "symptoms": expanded_terms,
+                 "vitals": vitals or {}},
+                self.pool,
+            )
+            tool_results["score_differential"] = score_result
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Scored conditions")
 
-        # ── Synthesise with Sonnet ───────────────────────────────────────────
-        return await self._synthesize_analyze(complaint, patient, vitals, core_history, tool_results)
+        # 2d. Check safety flags
+        if condition_ids:
+            safety_result = await TOOL_HANDLERS["check_safety_flags"](
+                {"symptoms": expanded_terms, "condition_ids": condition_ids,
+                 "vitals": vitals or {}},
+                self.pool,
+            )
+            tool_results["check_safety_flags"] = safety_result
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Safety flags checked")
+
+        # 2e. Get detail for top 3 conditions
+        scored = tool_results.get("score_differential", {}).get("scored_conditions", [])
+        top_ids = [s["condition_id"] for s in scored[:3]]
+        for cid in top_ids:
+            detail = await TOOL_HANDLERS["get_condition_detail"](
+                {"condition_id": cid}, self.pool
+            )
+            tool_results["get_condition_detail"] = detail
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Got condition details")
+
+        # ── Step 3: Synthesise with Sonnet (single LLM call) ─────────────
+        result = await self._synthesize_analyze(complaint, patient, vitals, core_history, tool_results)
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Analysis complete")
+        return result
 
     # ── Refine endpoint ──────────────────────────────────────────────────────
 
@@ -340,6 +392,7 @@ class TriageAgent:
             response = self.client.messages.create(
                 model=self.haiku,
                 max_tokens=2048,
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = response.content[0].text.strip()
@@ -575,6 +628,7 @@ class TriageAgent:
             response = self.client.messages.create(
                 model=self.sonnet,
                 max_tokens=4096,
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = response.content[0].text.strip()

@@ -85,6 +85,7 @@ class SafetyChecker:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=1024,
+                temperature=0,
                 system=SAFETY_SYSTEM,
                 messages=[{"role": "user", "content": review_prompt}],
             )
