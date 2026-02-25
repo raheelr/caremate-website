@@ -1,12 +1,5 @@
-[build]
-builder = "nixpacks"
-
-[build.nixpacks]
-aptPkgs = []
-
 [deploy]
-startCommand = "uvicorn api.main:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 120
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
