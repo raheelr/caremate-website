@@ -401,6 +401,56 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                     })
                     existing_ids.add(row["id"])
 
+        # Fallback 3: Search conditions.description_text for multi-symptom matches.
+        # Catches conditions where the knowledge graph lacks edges but the STG
+        # description mentions the symptoms (e.g., Malaria: "fever, chills, rigors").
+        # Only activates when graph+name+chunk fallbacks found < 3 strong results.
+        strong_results = [c for c in conditions if c.get("adjusted_score", 0) >= 0.20]
+        if len(strong_results) < 3:
+            # Collect which conditions match which symptoms in description_text
+            desc_matches = {}  # condition_id -> {row, terms}
+            search_terms = [t for t in original_symptoms if len(t) >= 4]
+            for term in search_terms:
+                desc_rows = await conn.fetch("""
+                    SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
+                    FROM conditions c
+                    WHERE c.description_text ILIKE $1
+                    AND c.id != ALL($2::int[])
+                    LIMIT 20
+                """, f"%{term}%", list(existing_ids) or [0])
+                for row in desc_rows:
+                    cid = row["id"]
+                    if cid not in desc_matches:
+                        desc_matches[cid] = {"row": dict(row), "terms": set()}
+                    desc_matches[cid]["terms"].add(term)
+
+            # Add conditions where 2+ distinct symptoms match the description
+            for cid, data in sorted(
+                desc_matches.items(),
+                key=lambda x: len(x[1]["terms"]),
+                reverse=True,
+            ):
+                if len(data["terms"]) >= 2:
+                    row = data["row"]
+                    matched_terms = sorted(data["terms"])
+                    # Score: 0.25 per matching symptom, capped at 0.90
+                    score = min(0.25 * len(matched_terms), 0.90)
+                    conditions.append({
+                        "id": row["id"],
+                        "stg_code": row["stg_code"],
+                        "name": row["name"],
+                        "chapter_name": row["chapter_name"],
+                        "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                        "match_count": len(matched_terms),
+                        "raw_score": score,
+                        "matched_features": [
+                            f"{t} (description match)" for t in matched_terms
+                        ],
+                        "symptom_groups_matched": len(matched_terms),
+                        "adjusted_score": score,
+                    })
+                    existing_ids.add(row["id"])
+
         # Re-sort and limit
         conditions.sort(key=lambda c: (c.get("adjusted_score", 0), c.get("raw_score", 0)), reverse=True)
         conditions = conditions[:limit]
