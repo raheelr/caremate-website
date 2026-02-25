@@ -273,19 +273,8 @@ class TriageAgent:
         top_names = [f"{c.get('name','')} ({c.get('adjusted_score',0):.3f})" for c in conditions[:5]]
         logger.info(f"[{time.monotonic()-t0:.1f}s] Found {len(conditions)} conditions: {top_names}")
 
-        # 2c. Score differential
+        # 2c. Check safety flags
         condition_ids = [c["id"] for c in conditions[:15]]
-        if condition_ids:
-            score_result = await TOOL_HANDLERS["score_differential"](
-                {"condition_ids": condition_ids, "symptoms": expanded_terms,
-                 "vitals": vitals or {}},
-                self.pool,
-            )
-            tool_results["score_differential"] = score_result
-        scored_names = [f"{s.get('name','')} ({s.get('confidence',0):.3f})" for s in tool_results.get("score_differential", {}).get("scored_conditions", [])[:5]]
-        logger.info(f"[{time.monotonic()-t0:.1f}s] Scored conditions: {scored_names}")
-
-        # 2d. Check safety flags
         if condition_ids:
             safety_result = await TOOL_HANDLERS["check_safety_flags"](
                 {"symptoms": expanded_terms, "condition_ids": condition_ids,
@@ -295,9 +284,12 @@ class TriageAgent:
             tool_results["check_safety_flags"] = safety_result
         logger.info(f"[{time.monotonic()-t0:.1f}s] Safety flags checked")
 
-        # 2e. Get detail for top 3 conditions
-        scored = tool_results.get("score_differential", {}).get("scored_conditions", [])
-        top_ids = [s["condition_id"] for s in scored[:3]]
+        # 2d. Compute vitals-based acuity directly (no LLM needed)
+        acuity_info = self._compute_vitals_acuity(vitals or {})
+        tool_results["vitals_acuity"] = acuity_info
+
+        # 2e. Get detail for top 5 conditions (from search scores, not re-scored)
+        top_ids = [c["id"] for c in conditions[:5]]
         for cid in top_ids:
             detail = await TOOL_HANDLERS["get_condition_detail"](
                 {"condition_id": cid}, self.pool
@@ -427,6 +419,30 @@ class TriageAgent:
         return result
 
     # ── Private helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_vitals_acuity(vitals: dict) -> dict:
+        """Compute acuity from vitals thresholds — no LLM needed."""
+        acuity = "routine"
+        reasons = []
+        if vitals.get("systolic") and vitals["systolic"] >= 180:
+            acuity = "urgent"
+            reasons.append(f"Severe hypertension: BP {vitals['systolic']}/{vitals.get('diastolic', '?')}")
+        if vitals.get("oxygenSat") and vitals["oxygenSat"] < 92:
+            acuity = "urgent"
+            reasons.append(f"Low SpO2: {vitals['oxygenSat']}%")
+        if vitals.get("temperature") and vitals["temperature"] >= 39.0:
+            if acuity != "urgent":
+                acuity = "priority"
+            reasons.append(f"High fever: {vitals['temperature']}°C")
+        if vitals.get("heartRate") and (vitals["heartRate"] > 120 or vitals["heartRate"] < 50):
+            if acuity != "urgent":
+                acuity = "priority"
+            reasons.append(f"Abnormal heart rate: {vitals['heartRate']} bpm")
+        if vitals.get("respiratoryRate") and vitals["respiratoryRate"] >= 30:
+            acuity = "urgent"
+            reasons.append(f"Tachypnoea: {vitals['respiratoryRate']}/min")
+        return {"acuity": acuity, "reasons": reasons}
 
     def _build_analyze_prompt(self, complaint, patient, vitals, core_history):
         parts = [f"Chief complaint: {complaint}"]

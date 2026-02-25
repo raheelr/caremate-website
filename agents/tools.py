@@ -350,10 +350,10 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                         "chapter_name": row["chapter_name"],
                         "extraction_confidence": float(row["extraction_confidence"] or 1.0),
                         "match_count": 1,
-                        "raw_score": 0.15,  # condition name match is a strong signal
+                        "raw_score": 0.50,
                         "matched_features": [f"{orig_term} (condition name match)"],
                         "symptom_groups_matched": 1,
-                        "adjusted_score": 0.15,
+                        "adjusted_score": 0.50,
                     })
                     existing_ids.add(row["id"])
 
