@@ -45,7 +45,7 @@ Return ONLY valid JSON, no explanation."""
 class SafetyChecker:
 
     def __init__(self):
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.AsyncAnthropic()
         self.model = "claude-haiku-4-5-20251001"
 
     async def check(
@@ -82,7 +82,7 @@ class SafetyChecker:
         )
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.model,
                 max_tokens=1024,
                 temperature=0,

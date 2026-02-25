@@ -207,7 +207,7 @@ async def enrich_presentation(request: EnrichRequest):
 
         # Use Haiku to generate clinical prompts from STG data
         import anthropic
-        client = anthropic.Anthropic()
+        client = anthropic.AsyncAnthropic()
 
         stg_context = (
             f"Condition: {request.condition_name}\n"
@@ -217,7 +217,7 @@ async def enrich_presentation(request: EnrichRequest):
             f"Medicines: {json.dumps(detail.get('medicines_json', []), default=str)[:500]}"
         )
 
-        response = client.messages.create(
+        response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=2048,
             temperature=0,
@@ -275,9 +275,9 @@ async def query_rag(request: RAGQueryRequest):
         ])
 
         import anthropic
-        client = anthropic.Anthropic()
+        client = anthropic.AsyncAnthropic()
 
-        response = client.messages.create(
+        response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=2048,
             temperature=0,
@@ -369,9 +369,9 @@ async def suggest_dosing(request: DosingRequest):
         context = "\n".join([r["chunk_text"] for r in chunks]) if chunks else "No STG data found."
 
         import anthropic
-        client = anthropic.Anthropic()
+        client = anthropic.AsyncAnthropic()
 
-        response = client.messages.create(
+        response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             temperature=0,

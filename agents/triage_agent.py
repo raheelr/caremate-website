@@ -123,7 +123,7 @@ OTHER RULES:
 class TriageAgent:
 
     def __init__(self, pool: asyncpg.Pool):
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.AsyncAnthropic()
         self.pool = pool
         self.haiku = "claude-haiku-4-5-20251001"
         self.sonnet = "claude-sonnet-4-6"
@@ -183,7 +183,7 @@ class TriageAgent:
         )
 
         try:
-            extract_response = self.client.messages.create(
+            extract_response = await self.client.messages.create(
                 model=self.haiku,
                 max_tokens=512,
                 temperature=0,
@@ -362,7 +362,7 @@ class TriageAgent:
         )
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.haiku,
                 max_tokens=2048,
                 temperature=0,
@@ -413,7 +413,7 @@ class TriageAgent:
             "conditions": conditions_summary,
         }, default=str)
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.haiku,
                 max_tokens=512,
                 temperature=0,
@@ -637,7 +637,7 @@ class TriageAgent:
         )
 
         try:
-            response = self.client.messages.create(
+            response = await self.client.messages.create(
                 model=self.haiku,
                 max_tokens=2048,
                 temperature=0,
