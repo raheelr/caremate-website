@@ -50,17 +50,25 @@ After calling all tools, provide a brief clinical summary of your findings.
 """
 
 
-SYNTHESIS_PROMPT = """Produce triage JSON from this data. Use ONLY verified conditions.
+SYNTHESIS_PROMPT = """Produce triage JSON. Use ONLY verified conditions below.
 
 Complaint: {complaint} | Patient: {patient} | Vitals: {vitals}
-Conditions found: {verified_conditions}
+Conditions: {verified_conditions}
 Safety: {safety_data}
 
-Return JSON:
-{{"extracted_symptoms":["terms"],"acuity":"routine|priority|urgent","acuity_reasons":["reason"],"acuity_sources":["STG X.Y"],"conditions":[{{"condition_code":"stg_code","condition_name":"exact name","confidence":0.85,"matched_symptoms":["syms"],"reasoning":"why","source_references":["STG X.Y"]}}],"condition_symptoms":{{"name":[{{"id":"id","question":"Q?"}}]}},"needs_assessment":true,"assessment_questions":[{{"id":"hyp_code_1","question":"Q?","type":"yes_no","required":false,"round":1,"source_citation":"STG X.Y","grounding":"verified"}}]}}
+REQUIREMENTS:
+- Return 4-5 conditions ranked by likelihood (top condition highest confidence)
+- condition_symptoms: include 3-4 verification questions for EACH condition
+- extracted_symptoms: include all identified symptoms as descriptive phrases
+- assessment_questions: 4-5 discriminating questions across top conditions
+- condition_code/condition_name MUST match verified list exactly
+- source_references format "STG X.Y"
+- confidence 0.0-1.0
 
-Rules: condition_code/condition_name MUST be from the verified list. source_references format "STG X.Y". confidence 0-1. 3-5 assessment questions. Return ONLY valid JSON.
-"""
+JSON schema:
+{{"extracted_symptoms":["symptom phrase"],"acuity":"routine|priority|urgent","acuity_reasons":["short reason"],"acuity_sources":["STG X.Y"],"conditions":[{{"condition_code":"X.Y","condition_name":"Name","confidence":0.85,"matched_symptoms":["syms"],"reasoning":"brief why","source_references":["STG X.Y"]}}],"condition_symptoms":{{"Condition Name":[{{"id":"cs_X.Y_1","question":"Do you have...?"}}]}},"needs_assessment":true,"assessment_questions":[{{"id":"hyp_X.Y_1","question":"Q?","type":"yes_no","required":false,"round":1,"source_citation":"STG X.Y","grounding":"verified"}}]}}
+
+Return ONLY valid JSON."""
 
 
 REFINE_SYNTHESIS_PROMPT = """Based on the triage refinement data below, produce a JSON response.
@@ -274,9 +282,9 @@ class TriageAgent:
                 acuity_rank = {"routine": 0, "priority": 1, "urgent": 2}
                 if acuity_rank.get(corrected, 0) > acuity_rank.get(result.get("acuity", "routine"), 0):
                     result["acuity"] = corrected
-                    result.setdefault("acuity_reasons", []).append(
-                        f"Safety review escalated: {'; '.join(safety_review.get('concerns', []))}"
-                    )
+                    # Add each concern as a separate acuity reason (not one giant string)
+                    for concern in safety_review.get("concerns", [])[:3]:
+                        result.setdefault("acuity_reasons", []).append(concern)
                     result.setdefault("acuity_sources", []).append("Safety reviewer")
 
         return result
