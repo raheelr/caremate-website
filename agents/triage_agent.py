@@ -220,13 +220,19 @@ class TriageAgent:
             vitals_context = ", ".join(f"{k}={v}" for k, v in vitals.items() if v is not None)
 
         extract_prompt = (
-            f"Extract standardised clinical symptoms from this complaint. "
-            f"Return specific clinical terms (e.g. 'dysuria', 'pharyngitis', 'productive cough'), "
-            f"not vague terms like 'pain' or 'feeling unwell'.\n\n"
+            f"Extract symptoms from this complaint. For EACH symptom, include BOTH the "
+            f"common/patient-friendly term AND the formal clinical term.\n\n"
+            f"Examples:\n"
+            f"- 'sore throat' AND 'pharyngitis'\n"
+            f"- 'headache' AND 'cephalgia'\n"
+            f"- 'stiff neck' AND 'neck stiffness' AND 'nuchal rigidity'\n"
+            f"- 'burning when urinating' AND 'dysuria'\n"
+            f"- 'throwing up' AND 'vomiting'\n\n"
             f"Complaint: {complaint}\n"
             f"{patient_context}\n"
             f"{'Vitals: ' + vitals_context if vitals_context else ''}\n\n"
-            f"Return ONLY a JSON array of clinical terms, e.g. [\"pharyngitis\", \"fever\"]"
+            f"Return ONLY a flat JSON array with ALL terms (both common and clinical), "
+            f"e.g. [\"sore throat\", \"pharyngitis\", \"fever\", \"high temperature\"]"
         )
 
         try:
