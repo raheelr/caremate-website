@@ -431,12 +431,14 @@ async def handle_score_differential(tool_input: dict, pool: asyncpg.Pool) -> dic
                     has_red_flag = True
                 matched_symptoms.append(m["canonical_name"])
 
-            # Normalise: divide by max possible for this condition
+            # Normalise: divide by max possible, capping feature count
+            # to prevent enrichment-bloated conditions from having artificially low scores
             total_features = await conn.fetchval(
                 "SELECT COUNT(*) FROM clinical_relationships WHERE condition_id = $1",
                 cid
             )
-            max_possible = max(total_features * 0.18, 0.18)  # at least one feature
+            capped_features = min(total_features, 12)  # cap denominator
+            max_possible = max(capped_features * 0.18, 0.18)
             confidence = min(raw_score / max_possible, 1.0)
 
             # Check prerequisites

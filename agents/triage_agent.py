@@ -270,7 +270,8 @@ class TriageAgent:
         )
         tool_results["search_conditions"] = search_result
         conditions = search_result.get("conditions", [])
-        logger.info(f"[{time.monotonic()-t0:.1f}s] Found {len(conditions)} conditions")
+        top_names = [f"{c.get('name','')} ({c.get('adjusted_score',0):.3f})" for c in conditions[:5]]
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Found {len(conditions)} conditions: {top_names}")
 
         # 2c. Score differential
         condition_ids = [c["id"] for c in conditions[:15]]
@@ -281,7 +282,8 @@ class TriageAgent:
                 self.pool,
             )
             tool_results["score_differential"] = score_result
-        logger.info(f"[{time.monotonic()-t0:.1f}s] Scored conditions")
+        scored_names = [f"{s.get('name','')} ({s.get('confidence',0):.3f})" for s in tool_results.get("score_differential", {}).get("scored_conditions", [])[:5]]
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Scored conditions: {scored_names}")
 
         # 2d. Check safety flags
         if condition_ids:
@@ -626,7 +628,7 @@ class TriageAgent:
 
         try:
             response = self.client.messages.create(
-                model=self.sonnet,
+                model=self.haiku,
                 max_tokens=4096,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
