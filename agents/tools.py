@@ -329,12 +329,37 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
         conditions.sort(key=lambda c: (c["adjusted_score"], c["raw_score"]), reverse=True)
         conditions = conditions[:limit]
 
-        # Text-based fallback: search knowledge_chunks for original terms
+        # Fallback 1: condition NAME matching — if a search term appears in the
+        # condition name itself, include it (catches "pharyngitis" → "Tonsillitis And Pharyngitis")
+        existing_ids = {c["id"] for c in conditions}
+        for orig_term in original_symptoms:
+            if len(orig_term) < 4:
+                continue
+            name_rows = await conn.fetch("""
+                SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
+                FROM conditions c
+                WHERE c.name ILIKE $1
+                LIMIT 5
+            """, f"%{orig_term}%")
+            for row in name_rows:
+                if row["id"] not in existing_ids:
+                    conditions.append({
+                        "id": row["id"],
+                        "stg_code": row["stg_code"],
+                        "name": row["name"],
+                        "chapter_name": row["chapter_name"],
+                        "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                        "match_count": 1,
+                        "raw_score": 0.15,  # condition name match is a strong signal
+                        "matched_features": [f"{orig_term} (condition name match)"],
+                        "symptom_groups_matched": 1,
+                        "adjusted_score": 0.15,
+                    })
+                    existing_ids.add(row["id"])
+
+        # Fallback 2: search knowledge_chunks for original terms
         # to catch conditions where the chief complaint matches the STG text
         # even if the knowledge graph edges don't connect directly
-        # Search ALL section roles (CLINICAL_PRESENTATION, DOSING_TABLE, MANAGEMENT, etc.)
-        # because symptoms often appear in treatment context, not just the presentation section
-        existing_ids = {c["id"] for c in conditions}
         for orig_term in original_symptoms:
             chunk_rows = await conn.fetch("""
                 SELECT DISTINCT ON (c.id) c.id, c.stg_code, c.name, c.chapter_name,
