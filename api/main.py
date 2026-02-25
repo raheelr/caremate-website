@@ -298,8 +298,9 @@ async def query_rag(request: RAGQueryRequest):
         sources = [
             {
                 "heading": r.get("condition_name", ""),
-                "sectionRef": r.get("section_role", ""),
-                "sourceName": "STG",
+                "section_ref": r.get("section_role", ""),
+                "similarity": round(r.get("similarity", 0.0), 2) if "similarity" in r else 0.85,
+                "excerpt": (r.get("chunk_text", "")[:200] + "...") if r.get("chunk_text") else "",
             }
             for r in chunks
         ]
