@@ -635,7 +635,9 @@ class TriageAgent:
                 except (json.JSONDecodeError, TypeError):
                     referral = [referral] if referral else []
 
-            desc = _format_stg_text(detail.get("description_text", ""))
+            # NOTE: detail keys come from handle_get_condition_detail (tools.py)
+            # which remaps: description_text→description, medicines_json→medicines
+            desc = _format_stg_text(detail.get("description", ""))
             gm = _format_stg_text(detail.get("general_measures", ""))
             danger_signs_list = _split_to_bullet_list(
                 detail.get("danger_signs", "")
@@ -656,9 +658,10 @@ class TriageAgent:
                 guideline_entry["medication_warnings"] = medication_warnings
 
             # Fetch rich content (tables, algorithms) from knowledge_chunks
-            if detail.get("id"):
+            cond_id = detail.get("condition_id")
+            if cond_id:
                 async with self.pool.acquire() as conn:
-                    rich = await get_condition_rich_content(conn, detail["id"])
+                    rich = await get_condition_rich_content(conn, cond_id)
                 if rich:
                     # Clean cross-references from rich content too
                     for item in rich:

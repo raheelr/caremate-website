@@ -12,6 +12,7 @@ Six tools for the Anthropic tool_use loop:
 
 import json
 import logging
+import re
 import asyncpg
 from db.database import (
     get_conditions_for_symptoms,
@@ -93,6 +94,37 @@ def _apply_prevalence_boost(conditions: list[dict]) -> list[dict]:
         if tier:
             boost = SA_PREVALENCE_BOOST[tier]
             c["adjusted_score"] = round(c.get("adjusted_score", 0) * boost, 3)
+    return conditions
+
+
+# Chapters/conditions that are NOT diseases — their edges often represent
+# side effects, eligibility criteria, or counseling topics rather than
+# presenting symptoms. Apply a 60% penalty unless the complaint explicitly
+# mentions the procedure.
+_NON_DISEASE_CHAPTERS = {13}  # Chapter 13: Immunisation
+_NON_DISEASE_KEYWORDS = {"vaccine", "vaccination", "immunisation", "immunization",
+                          "jab", "shot", "inject", "booster", "flu shot"}
+
+
+def _penalize_non_disease(conditions: list[dict], complaint: str) -> list[dict]:
+    """Penalize non-disease conditions (immunisation, counseling) that matched
+    on side effects rather than patient intent."""
+    complaint_lower = complaint.lower()
+    # If the complaint mentions vaccines/immunisation, don't penalize
+    if any(kw in complaint_lower for kw in _NON_DISEASE_KEYWORDS):
+        return conditions
+    for c in conditions:
+        # chapter_name is a string like "Chapter 13: Immunisation"
+        chapter_name = c.get("chapter_name") or c.get("chapter") or ""
+        chapter_num = None
+        if isinstance(chapter_name, int):
+            chapter_num = chapter_name
+        elif isinstance(chapter_name, str):
+            m = re.match(r"(?:Chapter\s+)?(\d+)", chapter_name, re.IGNORECASE)
+            if m:
+                chapter_num = int(m.group(1))
+        if chapter_num in _NON_DISEASE_CHAPTERS:
+            c["adjusted_score"] = round(c.get("adjusted_score", 0) * 0.4, 3)
     return conditions
 
 
@@ -492,6 +524,10 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
 
         # SA prevalence boost: common PHC conditions get slight score boost
         conditions = _apply_prevalence_boost(conditions)
+
+        # Non-disease penalty: immunisation chapter conditions matched on side effects
+        complaint_text = " ".join(original_symptoms) if original_symptoms else " ".join(symptoms)
+        conditions = _penalize_non_disease(conditions, complaint_text)
 
         # Sort by adjusted_score, then raw_score as tiebreak
         conditions.sort(key=lambda c: (c["adjusted_score"], c["raw_score"]), reverse=True)
