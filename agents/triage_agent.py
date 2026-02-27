@@ -22,8 +22,112 @@ import asyncpg
 from typing import Optional
 
 from agents.tools import TOOL_HANDLERS
+from db.database import get_condition_rich_content
 
 logger = logging.getLogger(__name__)
+
+
+# ── STG text cleaning ────────────────────────────────────────────────────────
+
+def _clean_stg_references(text: str) -> str:
+    """Remove broken cross-references and academic markers from STG text.
+
+    The raw STG PDF contains navigation cues (see Section X, table below, etc.)
+    and evidence-level tags (LoE:IIIb16) that don't make sense in our app.
+    This strips them while preserving the clinical content.
+    """
+    if not text:
+        return text
+
+    # Strip PDF extraction noise: [Page 401], # CHAPTER 12: ..., page headers
+    text = re.sub(r"\[Page\s+\d+\]\s*", "", text)
+    text = re.sub(r"^#+\s*CHAPTER\s+\d+:.*$", "", text, flags=re.MULTILINE)
+    # Strip STG internal page numbers at start of text: "12.5\n" or "4.14"
+    text = re.sub(r"^\d+\.\d+\s*\n", "", text)
+
+    # Strip evidence level markers: LoE:IIb41, LoE:IIIb16, LoE: IVb15, etc.
+    text = re.sub(r"\s*LoE:\s*[A-Za-z0-9]+", "", text)
+
+    # "See Section 4.1: Prevention of ..." → "(Ref: Section 4.1)"
+    # Keep the section number for traceability but drop the nav instruction
+    text = re.sub(
+        r"[Ss]ee [Ss]ection\s+([\d.]+):\s*[^.)\n]+",
+        r"(Ref: Section \1)",
+        text,
+    )
+    # "See Section 4.1" without colon
+    text = re.sub(
+        r"[Ss]ee [Ss]ection\s+([\d.]+)",
+        r"(Ref: Section \1)",
+        text,
+    )
+
+    # "See Chapter 11: HIV and AIDS" → "(Ref: Chapter 11)"
+    text = re.sub(
+        r"[Ss]ee [Cc]hapter\s+(\d+):\s*[^.)\n]+",
+        r"(Ref: Chapter \1)",
+        text,
+    )
+    text = re.sub(
+        r"[Ss]ee [Cc]hapter\s+(\d+)",
+        r"(Ref: Chapter \1)",
+        text,
+    )
+
+    # "Refer to Section 11.8.2: Candidiasis" → "(Ref: Section 11.8.2)"
+    text = re.sub(
+        r"[Rr]efer to [Ss]ection\s+([\d.]+):\s*[^.)\n]+",
+        r"(Ref: Section \1)",
+        text,
+    )
+    text = re.sub(
+        r"[Rr]efer to [Ss]ection\s+([\d.]+)",
+        r"(Ref: Section \1)",
+        text,
+    )
+
+    # "Refer to Figure 11.1 below." → remove entirely
+    text = re.sub(
+        r"\s*\(?[Rr]efer to [Ff]igure\s+[\d.]+\s*(below|above)?\s*\.?\)?\s*",
+        " ",
+        text,
+    )
+
+    # "see/refer to table below/above [for/on X]" → remove
+    text = re.sub(
+        r"\s*\(?(?:[Ss]ee|[Rr]efer to)\s+[Tt]able\s*(below|above)\s*(?:(?:for|on)\s+[^.)\n]*)?\s*\.?\)?\s*",
+        " ",
+        text,
+    )
+
+    # "See Table 4.5: Treatment of..." → "(Ref: Table 4.5)"
+    text = re.sub(
+        r"[Ss]ee [Tt]able\s+([\d.]+):\s*[^.)\n]+",
+        r"(Ref: Table \1)",
+        text,
+    )
+    text = re.sub(
+        r"[Ss]ee [Tt]able\s+([\d.]+)",
+        r"(Ref: Table \1)",
+        text,
+    )
+
+    # Fix double parens: ((Ref: Section 11.1)) → (Ref: Section 11.1)
+    text = re.sub(r"\(\(Ref:", "(Ref:", text)
+    text = re.sub(r"\)\)", ")", text)
+
+    # Clean up double spaces left by removals
+    text = re.sub(r"  +", " ", text)
+    # Clean up orphaned parens: "( )" or "()"
+    text = re.sub(r"\(\s*\)", "", text)
+    # Clean up orphaned ", ," or " , " left from removals
+    text = re.sub(r",\s*,", ",", text)
+    # Clean up trailing orphaned prepositions before periods: " for." → "."
+    text = re.sub(r"\s+(for|of|to|from|in|on|with|and|or)\s*\.", ".", text)
+    # Clean up space before punctuation: " ." → "." and " ," → ","
+    text = re.sub(r"\s+([.,;:])", r"\1", text)
+
+    return text.strip()
 
 
 # ── STG text formatting ──────────────────────────────────────────────────────
@@ -38,7 +142,7 @@ def _format_stg_text(raw: str, max_summary: int = 300) -> dict:
     if not raw or not raw.strip():
         return {"summary": "", "full": ""}
 
-    text = raw.strip()
+    text = _clean_stg_references(raw.strip())
 
     # Normalise bullet markers to markdown "- "
     text = re.sub(r"^[»►•●]\s*", "- ", text, flags=re.MULTILINE)
@@ -88,7 +192,7 @@ def _split_to_bullet_list(raw: str) -> list[str]:
     if not raw or not raw.strip():
         return []
 
-    text = raw.strip()
+    text = _clean_stg_references(raw.strip())
 
     # Normalise bullet markers
     text = re.sub(r"^[»►•●]\s*", "- ", text, flags=re.MULTILINE)
@@ -528,7 +632,7 @@ class TriageAgent:
                 except (json.JSONDecodeError, TypeError):
                     referral = [referral] if referral else []
 
-            desc = _format_stg_text(detail.get("description", ""))
+            desc = _format_stg_text(detail.get("description_text", ""))
             gm = _format_stg_text(detail.get("general_measures", ""))
             danger_signs_list = _split_to_bullet_list(
                 detail.get("danger_signs", "")
@@ -547,6 +651,17 @@ class TriageAgent:
             }
             if medication_warnings:
                 guideline_entry["medication_warnings"] = medication_warnings
+
+            # Fetch rich content (tables, algorithms) from knowledge_chunks
+            if detail.get("id"):
+                async with self.pool.acquire() as conn:
+                    rich = await get_condition_rich_content(conn, detail["id"])
+                if rich:
+                    # Clean cross-references from rich content too
+                    for item in rich:
+                        item["content"] = _clean_stg_references(item["content"])
+                    guideline_entry["clinical_tables"] = rich
+
             stg_guidelines[name] = guideline_entry
         result["stg_guidelines"] = stg_guidelines
 

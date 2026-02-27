@@ -537,6 +537,68 @@ async def get_conditions_for_medications(
     return [dict(r) for r in rows]
 
 
+async def get_condition_rich_content(
+    conn: asyncpg.Connection,
+    condition_id: int,
+    max_chunks: int = 3,
+    max_chars: int = 4000,
+) -> list[dict]:
+    """Get table and algorithm chunks for a condition.
+
+    Returns the most relevant rich content chunks (tables, algorithms)
+    sorted by priority: algorithms first, then smaller tables.
+    Each chunk is capped at max_chars to avoid huge payloads.
+    """
+    rows = await conn.fetch("""
+        SELECT section_role, chunk_text, is_table, is_algorithm,
+               length(chunk_text) as chunk_len
+        FROM knowledge_chunks
+        WHERE condition_id = $1
+          AND (is_table = true OR is_algorithm = true)
+        ORDER BY
+            is_algorithm DESC,              -- algorithms first
+            length(chunk_text) ASC          -- shorter (more focused) chunks first
+        LIMIT $2
+    """, condition_id, max_chunks)
+
+    results = []
+    for r in rows:
+        text = r["chunk_text"] or ""
+        if len(text) > max_chars:
+            # Truncate at a line boundary
+            text = text[:max_chars]
+            last_nl = text.rfind("\n")
+            if last_nl > max_chars * 0.7:
+                text = text[:last_nl]
+            text += "\n..."
+
+        chunk_type = "algorithm" if r["is_algorithm"] else "table"
+        # Try to extract a meaningful title (skip noise lines)
+        import re as _re
+        lines = text.strip().split("\n")
+        title = ""
+        for line in lines:
+            clean = line.strip().lstrip("#").strip()
+            if not clean:
+                continue
+            # Skip noise: page refs, chapter headers, table separators, dashes
+            if (clean.startswith("|") or clean.startswith("[Page")
+                    or _re.match(r"^CHAPTER\s+\d+", clean)
+                    or _re.match(r"^---+$", clean)
+                    or clean == "..."):
+                continue
+            title = clean[:100]
+            break
+
+        results.append({
+            "title": title,
+            "content": text,
+            "type": chunk_type,
+        })
+
+    return results
+
+
 async def get_condition_detail(
     conn: asyncpg.Connection,
     condition_id: int
