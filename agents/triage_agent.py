@@ -53,17 +53,36 @@ After calling all tools, provide a brief clinical summary of your findings.
 SYNTHESIS_PROMPT = """Produce triage JSON. Use ONLY verified conditions below.
 
 Complaint: {complaint} | Patient: {patient} | Vitals: {vitals}
-Conditions: {verified_conditions}
+
+Conditions (from STG knowledge graph search, ranked by feature match score):
+{verified_conditions}
+
 Safety: {safety_data}
 
+ACUITY SELECTION (use vitals_acuity from safety data as baseline):
+- "routine": normal vitals, no red flags — THIS IS THE DEFAULT
+- "priority": mild vital abnormality (temp >= 39C, HR > 120 or < 50) OR a single confirmed red flag
+- "urgent": severe vitals (BP >= 180, SpO2 < 92, RR >= 30) OR multiple red flags
+- Do NOT escalate beyond the vitals_acuity unless red_flags are listed in the safety data.
+  Speculation about unconfirmed conditions is NOT grounds for escalation.
+
 REQUIREMENTS:
-- Return 4-5 conditions ranked by likelihood (top condition highest confidence)
-- condition_symptoms: include 3-4 verification questions for EACH condition
+- Return 4-5 conditions from the verified list above
+- The conditions above are ranked by automated STG feature matching. Use your clinical
+  judgment to re-rank based on the specific complaint, patient context, and vitals.
+  Conditions marked "(vitals-based)" MUST stay at the top — vitals are direct measurements.
+- condition_symptoms: 3-4 verification questions per condition. Use DANGER SIGNS and
+  KEY FEATURES provided for each condition to ask clinically specific questions.
+  Prioritize: (1) danger sign symptoms that determine urgency,
+  (2) features that distinguish between the top 2-3 conditions,
+  (3) features NOT already in the complaint that would confirm/rule out the condition.
+  Ask "Does the pain worsen when swallowing liquids?" NOT "When did you first notice?"
 - extracted_symptoms: include all identified symptoms as descriptive phrases
-- assessment_questions: 4-5 discriminating questions across top conditions
+- assessment_questions: 4-5 discriminating questions that help differentiate between
+  the top 2-3 conditions. Focus on features present in one condition but absent in others.
 - condition_code/condition_name MUST match verified list exactly
 - source_references format "STG X.Y"
-- confidence 0.0-1.0
+- confidence: top condition 0.80-0.95, decrease for lower-ranked conditions
 
 JSON schema:
 {{"extracted_symptoms":["symptom phrase"],"acuity":"routine|priority|urgent","acuity_reasons":["short reason"],"acuity_sources":["STG X.Y"],"conditions":[{{"condition_code":"X.Y","condition_name":"Name","confidence":0.85,"matched_symptoms":["syms"],"reasoning":"brief why","source_references":["STG X.Y"]}}],"condition_symptoms":{{"Condition Name":[{{"id":"cs_X.Y_1","question":"Do you have...?"}}]}},"needs_assessment":true,"assessment_questions":[{{"id":"hyp_X.Y_1","question":"Q?","type":"yes_no","required":false,"round":1,"source_citation":"STG X.Y","grounding":"verified"}}]}}
@@ -160,6 +179,7 @@ class TriageAgent:
         patient_context = ""
         is_child = False
         is_pregnant = False
+        patient_sex = None
         if patient:
             age = patient.get("age")
             sex = patient.get("sex", "unknown")
@@ -169,6 +189,8 @@ class TriageAgent:
                 is_child = True
             if preg == "pregnant":
                 is_pregnant = True
+            if sex in ("male", "female"):
+                patient_sex = sex
 
         vitals_context = ""
         if vitals:
@@ -216,7 +238,7 @@ class TriageAgent:
             "extract_symptoms": {"symptoms": symptoms, "count": len(symptoms)},
         }
 
-        # ── Step 2: Direct DB calls (no LLM needed) ──────────────────────
+        # ── Step 2: Direct DB calls (no LLM — all STG-grounded) ─────────
         # 2a. Expand synonyms
         expand_result = await TOOL_HANDLERS["expand_synonyms"](
             {"clinical_terms": symptoms}, self.pool
@@ -225,16 +247,36 @@ class TriageAgent:
         expanded_terms = expand_result.get("expanded_terms", symptoms)
         logger.info(f"[{time.monotonic()-t0:.1f}s] Expanded to {len(expanded_terms)} terms")
 
-        # 2b. Search conditions
+        # Extract medications from core history
+        medications = []
+        if core_history and core_history.get("medications"):
+            meds_raw = core_history["medications"]
+            if isinstance(meds_raw, str):
+                medications = [m.strip() for m in meds_raw.replace(",", ";").split(";") if m.strip()]
+            elif isinstance(meds_raw, list):
+                medications = [str(m).strip() for m in meds_raw if m]
+
+        # 2b. Search conditions (pure DB search — graph + STG text fallbacks)
+        patient_age = patient.get("age") if patient else None
         search_result = await TOOL_HANDLERS["search_conditions"](
             {"symptoms": expanded_terms, "original_symptoms": symptoms,
-             "patient_is_child": is_child, "patient_is_pregnant": is_pregnant},
+             "patient_is_child": is_child, "patient_is_pregnant": is_pregnant,
+             "patient_sex": patient_sex, "patient_age": patient_age,
+             "medications": medications},
             self.pool,
         )
         tool_results["search_conditions"] = search_result
         conditions = search_result.get("conditions", [])
         top_names = [f"{c.get('name','')} ({c.get('adjusted_score',0):.3f})" for c in conditions[:5]]
         logger.info(f"[{time.monotonic()-t0:.1f}s] Found {len(conditions)} conditions: {top_names}")
+
+        # 2b-extra. Vitals-based condition injection (100% STG-grounded)
+        # STG defines Hypertension as systolic >= 140 mmHg or diastolic >= 90 mmHg.
+        # If vitals show elevated BP, inject/boost Hypertension — the graph has no
+        # symptom edges for headache/dizziness → hypertension.
+        conditions = await self._inject_vitals_conditions(conditions, vitals or {})
+        # Update tool_results so _extract_verified_conditions sees the injected conditions
+        tool_results["search_conditions"]["conditions"] = conditions
 
         # 2c. Parallel: safety flags + condition details + vitals acuity
         condition_ids = [c["id"] for c in conditions[:15]]
@@ -283,11 +325,23 @@ class TriageAgent:
             if corrected:
                 acuity_rank = {"routine": 0, "priority": 1, "urgent": 2}
                 if acuity_rank.get(corrected, 0) > acuity_rank.get(result.get("acuity", "routine"), 0):
-                    result["acuity"] = corrected
-                    # Add each concern as a separate acuity reason (not one giant string)
-                    for concern in safety_review.get("concerns", [])[:3]:
-                        result.setdefault("acuity_reasons", []).append(concern)
-                    result.setdefault("acuity_sources", []).append("Safety reviewer")
+                    # Escalation guard: if vitals are normal AND no deterministic red flags
+                    # were found, cap speculative escalation at "priority" (not "urgent")
+                    safety_flags = tool_results.get("check_safety_flags", {})
+                    has_deterministic_flags = (
+                        len(safety_flags.get("red_flags_triggered", [])) > 0
+                        or len(safety_flags.get("vitals_flags", [])) > 0
+                    )
+                    if corrected == "urgent" and not has_deterministic_flags:
+                        corrected = "priority"
+                        logger.info("Safety reviewer wanted 'urgent' but no deterministic "
+                                    "red flags found — capped at 'priority'")
+
+                    if acuity_rank.get(corrected, 0) > acuity_rank.get(result.get("acuity", "routine"), 0):
+                        result["acuity"] = corrected
+                        for concern in safety_review.get("concerns", [])[:3]:
+                            result.setdefault("acuity_reasons", []).append(concern)
+                        result.setdefault("acuity_sources", []).append("Safety reviewer")
 
         # ── Override extracted_symptoms with step 1 results ─────────
         # The synthesis LLM may add vitals interpretations to extracted_symptoms.
@@ -466,25 +520,47 @@ class TriageAgent:
             {"name": c.get("name", ""), "score": c.get("adjusted_score", 0)}
             for c in conditions[:5]
         ]
+        computed_acuity = acuity_info.get("acuity", "routine")
+        computed_reasons = acuity_info.get("reasons", [])
+        reasons_str = ", ".join(computed_reasons) if computed_reasons else "none"
+
         review_input = json.dumps({
             "complaint": complaint,
             "patient": patient or {},
             "vitals": vitals or {},
-            "acuity": acuity_info.get("acuity", "routine"),
-            "acuity_reasons": acuity_info.get("reasons", []),
+            "computed_acuity": computed_acuity,
+            "computed_acuity_reasons": computed_reasons,
             "extracted_symptoms": symptoms,
             "conditions": conditions_summary,
         }, default=str)
+
+        system_prompt = (
+            "You are a clinical safety reviewer. Check triage results for missed red flags or dangerous omissions.\n\n"
+            "ACUITY DEFINITIONS:\n"
+            '- "routine": All vitals normal, no red flags triggered. THIS IS THE DEFAULT.\n'
+            '- "priority": Mild vital abnormality (temp >= 39C, HR > 120/<50) OR a single confirmed red flag.\n'
+            '- "urgent": Severe vitals (BP >= 180, SpO2 < 92, RR >= 30) OR multiple confirmed red flags '
+            "OR danger signs requiring immediate referral.\n\n"
+            f"The automated vitals check computed acuity as \"{computed_acuity}\" "
+            f"(reasons: {reasons_str}).\n\n"
+            "CRITICAL RULES:\n"
+            "1. If vitals are normal and computed acuity is \"routine\", do NOT escalate based on speculation "
+            "about what the patient MIGHT have. \"Patient could be immunocompromised\" is NOT evidence.\n"
+            "2. You may ONLY escalate if you identify a SPECIFIC, NAMED red flag or danger sign that the "
+            "automated system MISSED and that is PRESENT in the patient's stated symptoms.\n"
+            "3. Do NOT infer symptoms the patient did not report.\n"
+            "4. If the computed acuity is correct, return {\"safe\": true}.\n\n"
+            "Return JSON: {\"safe\":true} or "
+            "{\"safe\":false,\"concerns\":[\"specific concern\"],\"corrected_acuity\":\"priority or urgent\","
+            "\"missing_conditions\":[\"...\"]}"
+        )
+
         try:
             response = await self.client.messages.create(
                 model=self.haiku,
                 max_tokens=512,
                 temperature=0,
-                system=(
-                    "Review triage for safety. Check for: missed red flags, dangerous omissions, "
-                    "acuity appropriateness. Return JSON: {\"safe\":true} or "
-                    "{\"safe\":false,\"concerns\":[\"...\"],\"corrected_acuity\":\"urgent\",\"missing_conditions\":[\"...\"]}"
-                ),
+                system=system_prompt,
                 messages=[{"role": "user", "content": review_input}],
             )
             text = response.content[0].text.strip()
@@ -519,6 +595,75 @@ class TriageAgent:
             reasons.append(f"Tachypnoea: {vitals['respiratoryRate']}/min")
         return {"acuity": acuity, "reasons": reasons}
 
+    async def _inject_vitals_conditions(self, conditions: list, vitals: dict) -> list:
+        """
+        Inject/boost conditions based on vital signs using the vitals_condition_mapping table.
+        Fully data-driven — no hardcoded condition logic.
+
+        Two marker modes from the table:
+        - force_rank_one=TRUE: "vitals-based" marker → forced to #1 in synthesis
+        - force_rank_one=FALSE: "noted" marker → included but LLM ranks it naturally
+        """
+        if not vitals:
+            return conditions
+
+        from db.database import get_vitals_mappings
+
+        async with self.pool.acquire() as conn:
+            mappings = await get_vitals_mappings(conn, vitals)
+
+        if not mappings:
+            return conditions
+
+        existing_ids = {c["id"] for c in conditions}
+        injected = False
+
+        for mapping in mappings:
+            cid = mapping["condition_id"]
+            score = mapping["score_boost"]
+            stg_code = mapping["stg_code"]
+            condition_name = mapping["condition_name"]
+            severity = mapping["severity_label"] or ""
+            force = mapping["force_rank_one"]
+            stg_ref = mapping["stg_reference"] or f"STG {stg_code}"
+            vital_name = mapping["vital_name"]
+            vital_value = vitals.get(vital_name)
+
+            # Build feature description
+            marker = "vitals-based" if force else "noted"
+            feat = f"{vital_name}={vital_value} → {severity} ({marker}, {stg_ref})"
+
+            if cid in existing_ids:
+                for c in conditions:
+                    if c["id"] == cid:
+                        if score > c.get("adjusted_score", 0):
+                            c["adjusted_score"] = score
+                            c["raw_score"] = max(c.get("raw_score", 0), score)
+                        if feat not in c.get("matched_features", []):
+                            c.setdefault("matched_features", []).append(feat)
+                        break
+            else:
+                conditions.append({
+                    "id": cid,
+                    "stg_code": stg_code,
+                    "name": condition_name,
+                    "chapter_name": mapping.get("chapter_name", ""),
+                    "extraction_confidence": float(mapping.get("extraction_confidence", 1.0) or 1.0),
+                    "match_count": 1,
+                    "raw_score": score,
+                    "matched_features": [feat],
+                    "symptom_groups_matched": 1,
+                    "adjusted_score": score,
+                })
+                existing_ids.add(cid)
+            injected = True
+            logger.info(f"Vitals injection: {condition_name} ({vital_name}={vital_value}, score={score}, force={force})")
+
+        if injected:
+            conditions.sort(key=lambda c: (c.get("adjusted_score", 0), c.get("raw_score", 0)), reverse=True)
+
+        return conditions
+
     def _build_analyze_prompt(self, complaint, patient, vitals, core_history):
         parts = [f"Chief complaint: {complaint}"]
         if patient:
@@ -544,7 +689,7 @@ class TriageAgent:
         """
         verified = {}
 
-        # From search_conditions
+        # From search_conditions — include score and matched features for ranking
         for c in tool_results.get("search_conditions", {}).get("conditions", []):
             code = c.get("stg_code", "")
             if code:
@@ -552,6 +697,9 @@ class TriageAgent:
                     "stg_code": code,
                     "name": c.get("name", ""),
                     "chapter": c.get("chapter_name", ""),
+                    "score": c.get("adjusted_score", c.get("raw_score", 0)),
+                    "matched_features": c.get("matched_features", []),
+                    "groups_matched": c.get("symptom_groups_matched", 0),
                 }
 
         # From score_differential
@@ -597,12 +745,32 @@ class TriageAgent:
             if strict:
                 # In strict mode, condition must exist in DB
                 if code not in valid_codes:
-                    # Try to find it by name
+                    # Try to find it by name — use partial matching to handle
+                    # LLM shortening names (e.g. "Malaria" vs "Malaria, Non-Severe/Uncomplicated")
                     matched_code = None
+                    name_lower = name.lower()
+                    # 1. Exact match
                     for vc, vdata in verified.items():
-                        if vdata["name"].lower() == name.lower():
+                        if vdata["name"].lower() == name_lower:
                             matched_code = vc
                             break
+                    # 2. Contains match (LLM name is substring of DB name, or vice versa)
+                    if not matched_code:
+                        for vc, vdata in verified.items():
+                            db_name = vdata["name"].lower()
+                            if name_lower in db_name or db_name in name_lower:
+                                matched_code = vc
+                                break
+                    # 3. Significant word overlap (at least 2 words match)
+                    if not matched_code:
+                        name_words = set(w for w in name_lower.split() if len(w) > 3)
+                        best_overlap = 0
+                        for vc, vdata in verified.items():
+                            db_words = set(w for w in vdata["name"].lower().split() if len(w) > 3)
+                            overlap = len(name_words & db_words)
+                            if overlap > best_overlap and overlap >= 2:
+                                best_overlap = overlap
+                                matched_code = vc
                     if matched_code:
                         c["condition_code"] = matched_code
                         code = matched_code
@@ -657,14 +825,15 @@ class TriageAgent:
             q["source_citation"] = verified_citation
             q["grounding"] = "verified" if verified_citation else "unverified"
 
-        # Scrub condition_symptoms keys — must match verified names
+        # Scrub condition_symptoms keys — must match verified names (partial matching)
         raw_cs = result.get("condition_symptoms", {})
         clean_cs = {}
         for key, questions in raw_cs.items():
-            # Find the verified name that matches
             matched_name = None
+            key_lower = key.lower()
             for v in verified.values():
-                if v["name"].lower() == key.lower():
+                db_name = v["name"].lower()
+                if db_name == key_lower or key_lower in db_name or db_name in key_lower:
                     matched_name = v["name"]
                     break
             if matched_name:
@@ -677,10 +846,51 @@ class TriageAgent:
         """Use Haiku to produce the final AnalyzeResponse-shaped JSON."""
         # Build verified conditions lookup from DB-sourced tool results
         verified = self._extract_verified_conditions(tool_results)
-        verified_text = "\n".join(
-            f"- {v['stg_code']}: {v['name']}"
-            for v in verified.values()
-        ) or "No conditions found."
+        # Include search scores + matched STG features so LLM ranks from evidence
+        verified_sorted = sorted(
+            verified.values(),
+            key=lambda v: v.get("score", 0),
+            reverse=True,
+        )
+        # Promote vitals-injected conditions to the top.
+        # Vitals are direct measurement — more definitive than symptom-graph
+        # matching (e.g., BP 170/100 IS hypertension, regardless of what
+        # "headache + dizziness" matches in the graph).
+        for i, v in enumerate(verified_sorted):
+            features = v.get("matched_features", [])
+            if any("vitals-based" in f for f in features):
+                if i > 0:
+                    verified_sorted.insert(0, verified_sorted.pop(i))
+                break  # only one vitals-injected condition expected
+        details = tool_results.get("condition_details", {})
+        verified_lines = []
+        for rank, v in enumerate(verified_sorted, 1):
+            features = v.get("matched_features", [])
+            # Show clean feature names without "(STG text match)" suffixes
+            clean_feats = []
+            for f in features[:5]:
+                # Strip source annotations like "(condition name match)", "(STG text in ...)"
+                base = f.split(" (")[0] if " (" in f else f
+                if base not in clean_feats:
+                    clean_feats.append(base)
+            feat_str = ", ".join(clean_feats) if clean_feats else "name/text match"
+            line = f"#{rank}. {v['stg_code']}: {v['name']} (matched: {feat_str})"
+
+            # For top 3 conditions, include danger signs and description so the LLM
+            # can generate clinically specific verification questions
+            if rank <= 3:
+                for cid, d in details.items():
+                    if d.get("stg_code") == v["stg_code"]:
+                        danger = d.get("danger_signs", "")
+                        if danger:
+                            line += f"\n   DANGER SIGNS: {danger[:200]}"
+                        desc = d.get("description", "")
+                        if desc:
+                            line += f"\n   KEY FEATURES: {desc[:250]}"
+                        break
+
+            verified_lines.append(line)
+        verified_text = "\n".join(verified_lines) or "No conditions found."
 
         # Build compact safety summary
         safety = tool_results.get("check_safety_flags", {})
@@ -719,6 +929,43 @@ class TriageAgent:
         # Post-process: scrub any references Sonnet hallucinated despite instructions
         result = self._scrub_references(result, verified)
 
+        # Enforce vitals-injected conditions at top of results.
+        # Vitals are direct measurements (e.g., BP 170/100 = Hypertension) so they
+        # MUST rank #1 regardless of what the LLM decides. For non-vitals conditions,
+        # trust the LLM's clinical judgment informed by the search-ranked prompt.
+        vitals_codes = set()
+        for v in verified_sorted:
+            if any("vitals-based" in f for f in v.get("matched_features", [])):
+                vitals_codes.add(v["stg_code"])
+
+        if vitals_codes:
+            conditions = result.get("conditions", [])
+            vitals_conds = []
+            other_conds = []
+            for c in conditions:
+                if c.get("condition_code") in vitals_codes:
+                    vitals_conds.append(c)
+                else:
+                    other_conds.append(c)
+
+            # If vitals condition was dropped by the LLM, add it back from search data
+            existing_vitals = {c.get("condition_code") for c in vitals_conds}
+            for v in verified_sorted:
+                code = v["stg_code"]
+                if code in vitals_codes and code not in existing_vitals:
+                    features = v.get("matched_features", [])
+                    clean_feats = [f.split(" (")[0] if " (" in f else f for f in features[:3]]
+                    vitals_conds.append({
+                        "condition_code": code,
+                        "condition_name": v["name"],
+                        "confidence": 0.90,
+                        "matched_symptoms": clean_feats,
+                        "reasoning": "Vitals directly indicate this condition (STG criteria)",
+                        "source_references": [f"STG {code}"],
+                    })
+
+            result["conditions"] = vitals_conds + other_conds
+
         return result
 
     @staticmethod
@@ -739,17 +986,30 @@ class TriageAgent:
         except json.JSONDecodeError:
             pass
 
-        # Try to find JSON object boundaries
+        # Try to find JSON object boundaries (string-aware)
         start = text.find("{")
         if start == -1:
             raise json.JSONDecodeError("No JSON object found", text, 0)
 
-        # Find the matching closing brace
         depth = 0
+        in_string = False
+        escape = False
         for i in range(start, len(text)):
-            if text[i] == "{":
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
                 depth += 1
-            elif text[i] == "}":
+            elif ch == "}":
                 depth -= 1
                 if depth == 0:
                     return json.loads(text[start:i + 1])
@@ -761,31 +1021,39 @@ class TriageAgent:
         """Build a response from raw tool results when synthesis fails.
         All references come directly from DB-sourced tool results — no hallucination possible."""
         symptoms = tool_results.get("extract_symptoms", {}).get("symptoms", [])
-        score_data = tool_results.get("score_differential", {})
-        scored = score_data.get("scored_conditions", [])
         safety = tool_results.get("check_safety_flags", {})
 
+        # Use search_conditions results directly (score_differential is not called separately)
+        search_data = tool_results.get("search_conditions", {})
+        search_conditions = search_data.get("conditions", [])
+
         conditions = []
-        for s in scored[:5]:
+        for i, s in enumerate(search_conditions[:5]):
             code = s.get("stg_code", "")
+            score = s.get("adjusted_score", s.get("raw_score", 0))
+            # Convert score to confidence: normalize to 0-1 range, highest gets ~0.90
+            confidence = round(min(score / max(search_conditions[0].get("adjusted_score", 1), 0.01) * 0.90, 0.95), 2)
             conditions.append({
                 "condition_code": code,
                 "condition_name": s.get("name", ""),
-                "confidence": s.get("confidence", 0),
-                "matched_symptoms": s.get("matched_symptoms", []),
-                "reasoning": "Matched via knowledge graph",
+                "confidence": confidence,
+                "matched_symptoms": s.get("matched_features", []),
+                "reasoning": "Matched via STG knowledge graph",
                 "source_references": [f"STG {code}"] if code else [],
             })
 
-        acuity = score_data.get("acuity", "routine")
+        acuity = "routine"
+        vitals_acuity = tool_results.get("vitals_acuity", {})
+        if vitals_acuity.get("acuity"):
+            acuity = vitals_acuity["acuity"]
         if safety.get("requires_escalation"):
             acuity = "urgent"
 
         return {
             "extracted_symptoms": symptoms,
             "acuity": acuity,
-            "acuity_reasons": score_data.get("acuity_reasons", []),
-            "acuity_sources": score_data.get("acuity_sources", []),
+            "acuity_reasons": vitals_acuity.get("reasons", []),
+            "acuity_sources": [],
             "conditions": conditions,
             "condition_symptoms": {},
             "needs_assessment": True,

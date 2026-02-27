@@ -11,15 +11,53 @@ Six tools for the Anthropic tool_use loop:
 """
 
 import json
+import logging
 import asyncpg
 from db.database import (
     get_conditions_for_symptoms,
+    get_conditions_for_medications,
     get_condition_detail,
     get_red_flag_matches,
     get_condition_red_flags,
     get_condition_prerequisites,
     resolve_to_canonical,
+    vector_search_conditions,
 )
+
+logger = logging.getLogger(__name__)
+
+
+async def _filter_parent_headings(conn, conditions: list[dict]) -> list[dict]:
+    """
+    Remove parent heading conditions when a populated child exists.
+    E.g., "4.7 Hypertension" is removed if "4.7.1 Hypertension In Adults" exists
+    with non-empty description_text.
+    """
+    codes = [c.get("stg_code", "") for c in conditions if c.get("stg_code")]
+    if not codes:
+        return conditions
+
+    rows = await conn.fetch("""
+        SELECT DISTINCT parent_code FROM (
+            SELECT unnest($1::text[]) as parent_code
+        ) p WHERE EXISTS (
+            SELECT 1 FROM conditions c
+            WHERE c.stg_code LIKE parent_code || '.%'
+            AND c.stg_code != parent_code
+            AND c.description_text IS NOT NULL
+            AND TRIM(c.description_text) != ''
+        )
+    """, codes)
+    parent_codes = {r["parent_code"] for r in rows}
+
+    if not parent_codes:
+        return conditions
+
+    filtered = [c for c in conditions if c.get("stg_code", "") not in parent_codes]
+    if len(filtered) < len(conditions):
+        removed = len(conditions) - len(filtered)
+        logger.info(f"Filtered {removed} parent heading condition(s) from results")
+    return filtered
 
 
 # ── Tool Definitions (Anthropic tool_use JSON schemas) ───────────────────────
@@ -276,6 +314,9 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
     original_symptoms = [s.lower().strip() for s in tool_input.get("original_symptoms", [])]
     is_child = tool_input.get("patient_is_child", False)
     is_pregnant = tool_input.get("patient_is_pregnant", False)
+    patient_sex = tool_input.get("patient_sex")
+    patient_age = tool_input.get("patient_age")
+    medications = tool_input.get("medications", [])
     limit = tool_input.get("limit", 10)
 
     # If no original_symptoms provided, treat each symptom as its own group
@@ -295,7 +336,8 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
 
         # Search with the full term set, generous limit
         conditions = await get_conditions_for_symptoms(
-            conn, all_search_terms, is_child, is_pregnant, limit=50
+            conn, all_search_terms, is_child, is_pregnant,
+            patient_sex=patient_sex, patient_age=patient_age, limit=50
         )
 
         # Re-score with group awareness
@@ -325,13 +367,74 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                 c["raw_score"] * max(c["symptom_groups_matched"], 1), 3
             )
 
+        # Prerequisite penalty: conditions requiring specific context (e.g., HIV+)
+        # score lower when that context is unconfirmed by the patient
+        for c in conditions:
+            prereqs = await get_condition_prerequisites(conn, c["id"])
+            if prereqs:
+                prereq_names = [p["prerequisite"] for p in prereqs]
+                c["adjusted_score"] = round(c.get("adjusted_score", 0) * 0.5, 3)
+                c.setdefault("matched_features", []).append(
+                    f"requires: {', '.join(prereq_names)}"
+                )
+
         # Sort by adjusted_score, then raw_score as tiebreak
         conditions.sort(key=lambda c: (c["adjusted_score"], c["raw_score"]), reverse=True)
         conditions = conditions[:limit]
 
-        # Fallback 1: condition NAME matching — if a search term appears in the
-        # condition name itself, include it (catches "pharyngitis" → "Tonsillitis And Pharyngitis")
+        # Vector search (semantic safety net) — catches conditions where patient
+        # phrasing doesn't match graph edges lexically. Gracefully skips if
+        # embeddings not populated or VOYAGE_API_KEY not set.
+        try:
+            from agents.embeddings import get_embedding
+            query_text = " ".join(original_symptoms)
+            query_embedding = await get_embedding(query_text)
+            if query_embedding:
+                vector_results = await vector_search_conditions(
+                    conn, query_embedding,
+                    patient_sex=patient_sex, patient_age=patient_age,
+                    limit=15, min_similarity=0.65,
+                )
+                existing_ids_vec = {c["id"] for c in conditions}
+                existing_by_id_vec = {c["id"]: c for c in conditions}
+                for vr in vector_results:
+                    cid = vr["id"]
+                    sim = vr["similarity"]
+                    # Convert similarity to score: 0.65-1.0 → 0.15-0.85
+                    vec_score = round((sim - 0.65) / 0.35 * 0.70 + 0.15, 3)
+                    feat = f"semantic match ({sim:.2f}, {vr['best_section']})"
+                    if cid in existing_by_id_vec:
+                        # Boost existing if vector score is higher
+                        existing = existing_by_id_vec[cid]
+                        if vec_score > existing.get("adjusted_score", 0):
+                            existing["adjusted_score"] = vec_score
+                            existing["raw_score"] = max(existing.get("raw_score", 0), vec_score)
+                        if feat not in existing.get("matched_features", []):
+                            existing.setdefault("matched_features", []).append(feat)
+                    elif cid not in existing_ids_vec:
+                        conditions.append({
+                            "id": vr["id"],
+                            "stg_code": vr["stg_code"],
+                            "name": vr["name"],
+                            "chapter_name": vr["chapter_name"],
+                            "extraction_confidence": vr["extraction_confidence"],
+                            "match_count": 1,
+                            "raw_score": vec_score,
+                            "matched_features": [feat],
+                            "symptom_groups_matched": 1,
+                            "adjusted_score": vec_score,
+                        })
+                        existing_ids_vec.add(cid)
+                logger.info(f"Vector search: {len(vector_results)} results merged")
+        except Exception as e:
+            # Graceful degradation — vector search is optional
+            logger.debug(f"Vector search skipped: {e}")
+
+        # Fallback 1: condition NAME matching — if search terms appear in the
+        # condition name, include/boost it. Aggregates across ALL terms so multi-term
+        # matches score higher (e.g. "vaginal discharge" → "Vaginal Discharge Syndrome").
         existing_ids = {c["id"] for c in conditions}
+        name_matches = {}  # condition_id -> {row, terms}
         for orig_term in original_symptoms:
             if len(orig_term) < 4:
                 continue
@@ -339,34 +442,72 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                 SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
                 FROM conditions c
                 WHERE c.name ILIKE $1
+                AND ($2::text IS NULL
+                     OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
+                     OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
                 LIMIT 5
-            """, f"%{orig_term}%")
+            """, f"%{orig_term}%", patient_sex)
             for row in name_rows:
-                if row["id"] not in existing_ids:
-                    conditions.append({
-                        "id": row["id"],
-                        "stg_code": row["stg_code"],
-                        "name": row["name"],
-                        "chapter_name": row["chapter_name"],
-                        "extraction_confidence": float(row["extraction_confidence"] or 1.0),
-                        "match_count": 1,
-                        "raw_score": 0.50,
-                        "matched_features": [f"{orig_term} (condition name match)"],
-                        "symptom_groups_matched": 1,
-                        "adjusted_score": 0.50,
-                    })
-                    existing_ids.add(row["id"])
+                cid = row["id"]
+                if cid not in name_matches:
+                    name_matches[cid] = {"row": dict(row), "terms": set()}
+                name_matches[cid]["terms"].add(orig_term)
 
-        # Fallback 2: search knowledge_chunks for original terms
-        # to catch conditions where the chief complaint matches the STG text
-        # even if the knowledge graph edges don't connect directly
+        existing_by_id = {c["id"]: c for c in conditions}
+        for cid, data in sorted(
+            name_matches.items(),
+            key=lambda x: len(x[1]["terms"]),
+            reverse=True,
+        ):
+            num_terms = len(data["terms"])
+            # Score: 0.40 per matching term, capped at 0.90
+            name_score = min(0.40 * num_terms, 0.90)
+            matched_terms = sorted(data["terms"])
+
+            if cid in existing_by_id:
+                # BOOST existing condition if name match score is higher
+                existing = existing_by_id[cid]
+                if name_score > existing.get("adjusted_score", 0):
+                    existing["adjusted_score"] = name_score
+                    existing["raw_score"] = max(existing.get("raw_score", 0), name_score)
+                for t in matched_terms:
+                    feat = f"{t} (condition name match)"
+                    if feat not in existing.get("matched_features", []):
+                        existing.setdefault("matched_features", []).append(feat)
+            elif cid not in existing_ids:
+                row = data["row"]
+                conditions.append({
+                    "id": row["id"],
+                    "stg_code": row["stg_code"],
+                    "name": row["name"],
+                    "chapter_name": row["chapter_name"],
+                    "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                    "match_count": num_terms,
+                    "raw_score": name_score,
+                    "matched_features": [f"{t} (condition name match)" for t in matched_terms],
+                    "symptom_groups_matched": num_terms,
+                    "adjusted_score": name_score,
+                })
+                existing_ids.add(row["id"])
+
+        # Fallback 2: Multi-term knowledge_chunks search
+        # Searches STG text chunks for EACH symptom, then aggregates — conditions
+        # matching multiple distinct symptoms get proportionally higher scores.
+        # This catches conditions where the STG text describes the symptoms
+        # even though the knowledge graph lacks edges.
+        chunk_matches = {}  # condition_id -> {row, terms, best_section}
         for orig_term in original_symptoms:
+            if len(orig_term) < 3:
+                continue
             chunk_rows = await conn.fetch("""
                 SELECT DISTINCT ON (c.id) c.id, c.stg_code, c.name, c.chapter_name,
                        c.extraction_confidence, kc.section_role
                 FROM knowledge_chunks kc
                 JOIN conditions c ON c.id = kc.condition_id
                 WHERE kc.chunk_text ILIKE $1
+                AND ($2::text IS NULL
+                     OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
+                     OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
                 ORDER BY c.id,
                     CASE kc.section_role
                         WHEN 'CLINICAL_PRESENTATION' THEN 1
@@ -375,85 +516,190 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                         WHEN 'DOSING_TABLE' THEN 4
                         ELSE 5
                     END
-                LIMIT 10
-            """, f"%{orig_term}%")
+                LIMIT 15
+            """, f"%{orig_term}%", patient_sex)
             for row in chunk_rows:
-                if row["id"] not in existing_ids:
-                    # Score based on which section matched — presentation is strongest signal
-                    section_scores = {
-                        "CLINICAL_PRESENTATION": 0.12,
-                        "DANGER_SIGNS": 0.12,
-                        "MANAGEMENT": 0.10,
-                        "DOSING_TABLE": 0.08,
+                cid = row["id"]
+                if cid not in chunk_matches:
+                    chunk_matches[cid] = {
+                        "row": dict(row),
+                        "terms": set(),
+                        "best_section": row["section_role"],
                     }
-                    text_score = section_scores.get(row["section_role"], 0.06)
-                    conditions.append({
-                        "id": row["id"],
-                        "stg_code": row["stg_code"],
-                        "name": row["name"],
-                        "chapter_name": row["chapter_name"],
-                        "extraction_confidence": float(row["extraction_confidence"] or 1.0),
-                        "match_count": 1,
-                        "raw_score": text_score,
-                        "matched_features": [f"{orig_term} (text match in {row['section_role']})"],
-                        "symptom_groups_matched": 1,
-                        "adjusted_score": text_score,
-                    })
-                    existing_ids.add(row["id"])
+                chunk_matches[cid]["terms"].add(orig_term)
+                # Track the best (most relevant) section across all term matches
+                section_priority = {
+                    "CLINICAL_PRESENTATION": 1, "DANGER_SIGNS": 2,
+                    "MANAGEMENT": 3, "DOSING_TABLE": 4,
+                }
+                current_priority = section_priority.get(chunk_matches[cid]["best_section"], 5)
+                new_priority = section_priority.get(row["section_role"], 5)
+                if new_priority < current_priority:
+                    chunk_matches[cid]["best_section"] = row["section_role"]
+
+        # Score and add/boost conditions based on multi-term chunk matches
+        section_base_scores = {
+            "CLINICAL_PRESENTATION": 0.22,
+            "DANGER_SIGNS": 0.18,
+            "MANAGEMENT": 0.10,
+            "DOSING_TABLE": 0.08,
+        }
+        existing_by_id = {c["id"]: c for c in conditions}
+        for cid, data in sorted(
+            chunk_matches.items(),
+            key=lambda x: len(x[1]["terms"]),
+            reverse=True,
+        ):
+            num_terms = len(data["terms"])
+            base = section_base_scores.get(data["best_section"], 0.06)
+            # Multi-term scoring: base * num_terms, capped at 0.90
+            chunk_score = min(base * num_terms, 0.90)
+            matched_terms = sorted(data["terms"])
+
+            if cid in existing_by_id:
+                # BOOST existing condition if chunk score is higher
+                existing = existing_by_id[cid]
+                if chunk_score > existing.get("adjusted_score", 0):
+                    existing["adjusted_score"] = chunk_score
+                    existing["raw_score"] = max(existing.get("raw_score", 0), chunk_score)
+                    existing["symptom_groups_matched"] = max(
+                        existing.get("symptom_groups_matched", 0), num_terms
+                    )
+                    for t in matched_terms:
+                        feat = f"{t} (STG text match)"
+                        if feat not in existing.get("matched_features", []):
+                            existing.setdefault("matched_features", []).append(feat)
+            elif cid not in existing_ids:
+                row = data["row"]
+                conditions.append({
+                    "id": row["id"],
+                    "stg_code": row["stg_code"],
+                    "name": row["name"],
+                    "chapter_name": row["chapter_name"],
+                    "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                    "match_count": num_terms,
+                    "raw_score": chunk_score,
+                    "matched_features": [
+                        f"{t} (STG text in {data['best_section']})" for t in matched_terms
+                    ],
+                    "symptom_groups_matched": num_terms,
+                    "adjusted_score": chunk_score,
+                })
+                existing_ids.add(row["id"])
 
         # Fallback 3: Search conditions.description_text for multi-symptom matches.
-        # Catches conditions where the knowledge graph lacks edges but the STG
-        # description mentions the symptoms (e.g., Malaria: "fever, chills, rigors").
-        # Only activates when graph+name+chunk fallbacks found < 3 strong results.
-        strong_results = [c for c in conditions if c.get("adjusted_score", 0) >= 0.20]
-        if len(strong_results) < 3:
-            # Collect which conditions match which symptoms in description_text
-            desc_matches = {}  # condition_id -> {row, terms}
-            search_terms = [t for t in original_symptoms if len(t) >= 4]
-            for term in search_terms:
-                desc_rows = await conn.fetch("""
-                    SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
-                    FROM conditions c
-                    WHERE c.description_text ILIKE $1
-                    AND c.id != ALL($2::int[])
-                    LIMIT 20
-                """, f"%{term}%", list(existing_ids) or [0])
-                for row in desc_rows:
-                    cid = row["id"]
-                    if cid not in desc_matches:
-                        desc_matches[cid] = {"row": dict(row), "terms": set()}
-                    desc_matches[cid]["terms"].add(term)
+        # ALWAYS runs — can both ADD new conditions and BOOST existing low-scored
+        # conditions when their STG description mentions the patient's symptoms.
+        # This fixes cases where the knowledge graph lacks edges but the STG text
+        # clearly describes the symptoms (e.g., Malaria: "fever, chills, rigors").
+        desc_matches = {}  # condition_id -> {row, terms}
+        search_terms = [t for t in original_symptoms if len(t) >= 4]
+        for term in search_terms:
+            desc_rows = await conn.fetch("""
+                SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
+                FROM conditions c
+                WHERE c.description_text ILIKE $1
+                AND ($2::text IS NULL
+                     OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
+                     OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
+                LIMIT 20
+            """, f"%{term}%", patient_sex)
+            for row in desc_rows:
+                cid = row["id"]
+                if cid not in desc_matches:
+                    desc_matches[cid] = {"row": dict(row), "terms": set()}
+                desc_matches[cid]["terms"].add(term)
 
-            # Add conditions where 2+ distinct symptoms match the description
-            for cid, data in sorted(
-                desc_matches.items(),
-                key=lambda x: len(x[1]["terms"]),
-                reverse=True,
-            ):
-                if len(data["terms"]) >= 2:
-                    row = data["row"]
-                    matched_terms = sorted(data["terms"])
-                    # Score: 0.25 per matching symptom, capped at 0.90
-                    score = min(0.25 * len(matched_terms), 0.90)
+        # Boost existing or add new conditions where 2+ symptoms match
+        existing_by_id = {c["id"]: c for c in conditions}
+        for cid, data in sorted(
+            desc_matches.items(),
+            key=lambda x: len(x[1]["terms"]),
+            reverse=True,
+        ):
+            if len(data["terms"]) < 2:
+                continue
+            matched_terms = sorted(data["terms"])
+            # Score: 0.20 per matching symptom, capped at 0.90
+            desc_score = min(0.20 * len(data["terms"]), 0.90)
+
+            if cid in existing_by_id:
+                # BOOST existing condition if description score is higher
+                existing = existing_by_id[cid]
+                if desc_score > existing.get("adjusted_score", 0):
+                    existing["adjusted_score"] = desc_score
+                    existing["raw_score"] = max(existing.get("raw_score", 0), desc_score)
+                    existing["symptom_groups_matched"] = max(
+                        existing.get("symptom_groups_matched", 0), len(data["terms"])
+                    )
+                    for t in matched_terms:
+                        feat = f"{t} (description boost)"
+                        if feat not in existing.get("matched_features", []):
+                            existing.setdefault("matched_features", []).append(feat)
+            else:
+                # ADD new condition
+                row = data["row"]
+                conditions.append({
+                    "id": row["id"],
+                    "stg_code": row["stg_code"],
+                    "name": row["name"],
+                    "chapter_name": row["chapter_name"],
+                    "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                    "match_count": len(data["terms"]),
+                    "raw_score": desc_score,
+                    "matched_features": [
+                        f"{t} (description match)" for t in matched_terms
+                    ],
+                    "symptom_groups_matched": len(data["terms"]),
+                    "adjusted_score": desc_score,
+                })
+                existing_ids.add(row["id"])
+
+        # Medication boost: if patient is on medications, boost conditions those meds treat
+        if medications:
+            med_conditions = await get_conditions_for_medications(conn, medications)
+            existing_by_id = {c["id"]: c for c in conditions}
+            for mc in med_conditions:
+                cid = mc["id"]
+                med_name = mc["medicine_name"]
+                feat = f"current medication: {med_name} (medication-based)"
+                if cid in existing_by_id:
+                    existing = existing_by_id[cid]
+                    existing["adjusted_score"] = existing.get("adjusted_score", 0) + 0.15
+                    if feat not in existing.get("matched_features", []):
+                        existing.setdefault("matched_features", []).append(feat)
+                elif cid not in existing_ids:
                     conditions.append({
-                        "id": row["id"],
-                        "stg_code": row["stg_code"],
-                        "name": row["name"],
-                        "chapter_name": row["chapter_name"],
-                        "extraction_confidence": float(row["extraction_confidence"] or 1.0),
-                        "match_count": len(matched_terms),
-                        "raw_score": score,
-                        "matched_features": [
-                            f"{t} (description match)" for t in matched_terms
-                        ],
-                        "symptom_groups_matched": len(matched_terms),
-                        "adjusted_score": score,
+                        "id": mc["id"],
+                        "stg_code": mc["stg_code"],
+                        "name": mc["name"],
+                        "chapter_name": mc.get("chapter_name", ""),
+                        "extraction_confidence": 1.0,
+                        "match_count": 1,
+                        "raw_score": 0.40,
+                        "matched_features": [feat],
+                        "symptom_groups_matched": 0,
+                        "adjusted_score": 0.40,
                     })
-                    existing_ids.add(row["id"])
+                    existing_ids.add(cid)
 
         # Re-sort and limit
         conditions.sort(key=lambda c: (c.get("adjusted_score", 0), c.get("raw_score", 0)), reverse=True)
         conditions = conditions[:limit]
+
+        # Filter out parent headings (e.g., 4.7) when populated children exist (4.7.1)
+        conditions = await _filter_parent_headings(conn, conditions)
+
+        # Deduplicate by condition name — keep only highest-scoring entry
+        # (e.g., collapses 7 "Candidiasis, Oral (Thrush), Recurrent" into 1)
+        seen_names = {}
+        deduped = []
+        for c in conditions:
+            name = c.get("name", "")
+            if name not in seen_names:
+                seen_names[name] = True
+                deduped.append(c)
+        conditions = deduped
 
         red_flags = await get_red_flag_matches(conn, all_search_terms)
 
