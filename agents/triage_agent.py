@@ -815,7 +815,7 @@ class TriageAgent:
         try:
             response = await self.client.messages.create(
                 model=self.haiku,
-                max_tokens=2048,
+                max_tokens=4096,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -1260,7 +1260,7 @@ class TriageAgent:
         try:
             response = await self.client.messages.create(
                 model=self.haiku,
-                max_tokens=2048,
+                max_tokens=4096,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -1324,9 +1324,17 @@ class TriageAgent:
         """
         text = text.strip()
 
-        # Strip markdown fences
+        # Strip markdown fences (various formats)
         if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            # Handle ```json\n...\n``` and ```\n...\n```
+            first_newline = text.find("\n")
+            if first_newline > 0:
+                text = text[first_newline + 1:]
+            # Strip trailing fence
+            last_fence = text.rfind("```")
+            if last_fence > 0:
+                text = text[:last_fence]
+            text = text.strip()
 
         # Try direct parse first
         try:
@@ -1362,7 +1370,24 @@ class TriageAgent:
                 if depth == 0:
                     return json.loads(text[start:i + 1])
 
-        # Last resort: try parsing from the first { to the end
+        # Last resort: truncated JSON — try closing open braces/brackets
+        # This handles the common case where max_tokens was hit mid-output
+        truncated = text[start:]
+        # Close any open strings
+        if in_string:
+            truncated += '"'
+        # Close remaining brackets/braces
+        for _ in range(depth):
+            # Check if we're inside an array by scanning backwards
+            last_open = max(truncated.rfind("["), truncated.rfind("{"))
+            if last_open >= 0 and truncated[last_open] == "[":
+                truncated += "]"
+            truncated += "}"
+        try:
+            return json.loads(truncated)
+        except json.JSONDecodeError:
+            pass
+
         raise json.JSONDecodeError("Unbalanced JSON braces", text, start)
 
     def _build_fallback_response(self, tool_results: dict) -> dict:
@@ -1371,7 +1396,9 @@ class TriageAgent:
         symptoms = tool_results.get("extract_symptoms", {}).get("symptoms", [])
         safety = tool_results.get("check_safety_flags", {})
 
-        # Use search_conditions results directly (score_differential is not called separately)
+        # Use search_conditions results directly — these already have gender/age
+        # filtering, parent heading replacement, dedup, and non-disease exclusion
+        # applied in handle_search_conditions
         search_data = tool_results.get("search_conditions", {})
         search_conditions = search_data.get("conditions", [])
 
