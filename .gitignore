@@ -22,6 +22,11 @@ ingestion_quality_report.json
 ingestion_quality_report_summary.txt
 qa_vignette_results.json
 dry_run_extractions/
+extractions/
+docling_cache.json
+deep_test_results.json
+enrichment_report_full.json
+=1.24.0
 
 # OS
 .DS_Store

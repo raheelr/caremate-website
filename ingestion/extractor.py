@@ -16,8 +16,14 @@ import json
 import re
 import anthropic
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 from segmenter import ConditionSegment
+
+# Import MergedConditionInput if available (backward compat)
+try:
+    from multi_source_merger import MergedConditionInput
+except ImportError:
+    MergedConditionInput = None
 
 
 # ── Pydantic-style schemas (as dicts for JSON parsing) ───────────────────────
@@ -186,9 +192,10 @@ class ConditionExtractor:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
     
-    def extract(self, segment: ConditionSegment) -> dict:
+    def extract(self, segment) -> dict:
         """
         Extract structured data from a condition segment.
+        Accepts ConditionSegment or MergedConditionInput.
         Uses two-pass approach when ambiguity is detected.
         """
         print(f"  Extracting: {segment.display_name} (pages {segment.start_page}-{segment.end_page})")
@@ -235,23 +242,58 @@ class ConditionExtractor:
         result['chapter_name'] = segment.chapter_name
         result['source_pages'] = list(range(segment.start_page, segment.end_page + 1))
         result['raw_text'] = segment.raw_text
-        
+
+        # Track multi-source metadata if available
+        is_merged = MergedConditionInput and isinstance(segment, MergedConditionInput)
+        if is_merged:
+            result['_primary_source'] = segment.primary_source
+            result['_has_tables'] = segment.has_tables
+            result['_has_vision'] = segment.has_vision
+            result['_pdfplumber_chars'] = segment.pdfplumber_chars
+            result['_docling_chars'] = segment.docling_chars
+            result['_vision_chars'] = segment.vision_chars
+
         return result
     
-    def _build_prompt(self, segment: ConditionSegment, is_pass2: bool = False) -> str:
-        """Build the extraction prompt."""
-        
+    def _build_prompt(self, segment, is_pass2: bool = False) -> str:
+        """Build the extraction prompt. Works with ConditionSegment or MergedConditionInput."""
+
         pass2_note = """
 This is a SECOND PASS extraction. The first pass flagged this condition as ambiguous.
 Please reason carefully through each clinical feature and its edge type.
-For every feature, ask: "Is this a standard presenting symptom, OR would its presence 
+For every feature, ask: "Is this a standard presenting symptom, OR would its presence
 alone warrant urgent escalation?" Only RED_FLAG edges should trigger acuity escalation.
 """ if is_pass2 else ""
-        
-        return f"""You are extracting structured clinical data from a section of the 
-South African Standard Treatment Guidelines (STG/EML) for use in a clinical 
+
+        # Source quality context for MergedConditionInput
+        source_context = ""
+        is_merged = MergedConditionInput and isinstance(segment, MergedConditionInput)
+        if is_merged:
+            source_context = f"""
+SOURCE QUALITY CONTEXT:
+- Primary source: {segment.primary_source}
+- pdfplumber chars: {segment.pdfplumber_chars}
+- Docling chars: {segment.docling_chars}
+- Vision chars: {segment.vision_chars}
+"""
+            if segment.has_tables:
+                source_context += """
+TABLES DETECTED: Structured tables were extracted by Docling (AI-powered table parser).
+Extract EVERY medicine row from these tables as separate medicine entries with dose, route,
+frequency, duration, and treatment line. Do NOT skip any row. Tables appear at the end
+of the text under "--- STRUCTURED TABLES ---".
+"""
+            if segment.has_vision:
+                source_context += """
+VISUAL CONTENT: Flowcharts/diagrams were extracted by Claude Vision and appear at the end
+of the text under "--- VISUAL CONTENT ---". This includes algorithm decision paths and
+any text visible in images. Treat this content as authoritative STG text.
+"""
+
+        return f"""You are extracting structured clinical data from a section of the
+South African Standard Treatment Guidelines (STG/EML) for use in a clinical
 decision support system for nurse practitioners.
-{pass2_note}
+{pass2_note}{source_context}
 CRITICAL RULES:
 1. Only extract features explicitly stated in the text — never infer
 2. DESCRIPTION section → clinical_features with source_section="DESCRIPTION"
@@ -283,11 +325,12 @@ CONDITION TEXT TO EXTRACT:
 Extract all structured clinical data using the extract_condition tool.
 Flag your own uncertainty honestly in ambiguity_flags."""
     
-    def _pass1_extract(self, segment: ConditionSegment) -> dict:
-        """Fast extraction with Haiku. Retries up to 3x on overload."""
+    def _pass1_extract(self, segment) -> dict:
+        """Fast extraction with Haiku. Retries with exponential backoff."""
         import time
-        
-        for attempt in range(3):
+
+        max_retries = 5
+        for attempt in range(max_retries):
             try:
                 response = self.client.messages.create(
                     model=self.pass1_model,
@@ -299,19 +342,23 @@ Flag your own uncertainty honestly in ambiguity_flags."""
                         "content": self._build_prompt(segment, is_pass2=False)
                     }]
                 )
-                
+
                 self.total_input_tokens += response.usage.input_tokens
                 self.total_output_tokens += response.usage.output_tokens
-                
+
                 for block in response.content:
                     if block.type == "tool_use" and block.name == "extract_condition":
                         return block.input
                 break
-                
+
             except Exception as e:
-                if "overloaded" in str(e).lower() and attempt < 2:
-                    wait = (attempt + 1) * 15
-                    print(f"    API overloaded — waiting {wait}s and retrying...")
+                err_str = str(e).lower()
+                is_retryable = ("overloaded" in err_str or "rate" in err_str
+                                or "529" in err_str or "timeout" in err_str
+                                or "connection" in err_str)
+                if is_retryable and attempt < max_retries - 1:
+                    wait = min(15 * (2 ** attempt), 120)  # 15, 30, 60, 120
+                    print(f"    API error (attempt {attempt+1}/{max_retries}) — waiting {wait}s...", flush=True)
                     time.sleep(wait)
                     continue
                 raise
@@ -328,7 +375,7 @@ Flag your own uncertainty honestly in ambiguity_flags."""
             }
         }
     
-    def _pass2_extract(self, segment: ConditionSegment, pass1_result: dict) -> dict:
+    def _pass2_extract(self, segment, pass1_result: dict) -> dict:
         """Thorough extraction with Sonnet + extended thinking for ambiguous conditions."""
         
         pass1_summary = json.dumps({

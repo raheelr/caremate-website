@@ -1,0 +1,10 @@
+# Ingestion-only dependencies (NOT deployed to Railway)
+# These are only needed for the one-time STG PDF extraction pipeline.
+#
+# Install: pip install -r requirements-ingestion.txt
+#
+# Note: docling pulls in PyTorch (~2GB) and downloads models on first run (~3-4GB)
+
+docling>=2.5.0          # AI-powered PDF parsing with TableFormer
+PyMuPDF>=1.24.0         # PDF page -> image conversion for Vision
+tqdm>=4.66.0            # Progress bars

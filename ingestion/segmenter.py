@@ -123,9 +123,13 @@ class STGSegmenter:
             23: "Paediatric Dosing Tables",
         }
     
-    def segment(self) -> list[ConditionSegment]:
+    def segment(self, include_codes: set[str] = None, no_filter: bool = False) -> list[ConditionSegment]:
         """
         Main entry point. Returns list of all conditions found in the STG.
+
+        Args:
+            include_codes: If provided, always include these STG codes regardless of filtering rules
+            no_filter: If True, skip all filtering (return all 444 segments)
         """
         print(f"Opening PDF: {self.pdf_path}")
         
@@ -148,8 +152,18 @@ class STGSegmenter:
         # Step 5: Filter out heading-only parent sections
         # These are headings like "4.7 HYPERTENSION" that have no clinical content —
         # their actual content lives in sub-sections like "4.7.1 HYPERTENSION IN ADULTS"
+        if no_filter:
+            print(f"  No filtering applied (--no-filter mode)")
+            return segments
+
+        include_codes = include_codes or set()
         filtered = []
         for seg in segments:
+            # Always include explicitly requested codes
+            if seg.stg_code in include_codes:
+                filtered.append(seg)
+                continue
+
             # Count meaningful content lines (exclude the heading itself and ICD codes)
             lines = [l for l in seg.raw_text.split('\n') if l.strip()]
             content_lines = [
@@ -158,7 +172,7 @@ class STGSegmenter:
                 and not ICD10_CODE.match(l.strip())
             ]
             content_text = ' '.join(content_lines)
-            
+
             # Check for redirect-only sections ("See section X.Y" with no real content)
             redirect_keywords = ['see section', 'refer to section', 'refer to chapter', 'see chapter']
             is_redirect_only = (
@@ -166,7 +180,7 @@ class STGSegmenter:
                 any(kw in content_text.lower() for kw in redirect_keywords) and
                 not any(kw in content_text.upper() for kw in ['DESCRIPTION', 'MEDICINE', 'TREATMENT', 'DANGER'])
             )
-            
+
             if is_redirect_only:
                 # Always skip redirect-only sections — no useful content to extract
                 pass
@@ -181,11 +195,11 @@ class STGSegmenter:
                 )
                 if not has_children:
                     filtered.append(seg)  # Keep it — no children will cover it
-        
+
         skipped = len(segments) - len(filtered)
         if skipped:
             print(f"  Skipped {skipped} heading-only parent sections (content in sub-sections)")
-        
+
         return filtered
     
     def _extract_pages(self) -> list[dict]:

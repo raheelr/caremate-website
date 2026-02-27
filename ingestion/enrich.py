@@ -319,9 +319,6 @@ class ConditionEnricher:
                 ORDER BY section_role
             """, condition_id)
 
-        if not chunks:
-            return  # No text to enrich from
-
         # Build context for the LLM
         existing_features = []
         for f in features:
@@ -333,15 +330,47 @@ class ConditionEnricher:
         for c in chunks:
             chunks_text += f"\n[{c['section_role']}]\n{c['chunk_text']}\n"
 
-        prompt = (
-            f"CONDITION: {name} (STG {stg_code})\n\n"
-            f"EXISTING FEATURES ({len(features)} edges):\n"
-            + ("\n".join(existing_features) if existing_features else "(none)")
-            + f"\n\nSTG TEXT:\n{chunks_text}\n\n"
-            f"Identify gaps: patient-language symptoms missing from the graph, "
-            f"common symptoms mentioned in the text but not extracted, "
-            f"and proper synonym mappings (patient term → symptom canonical name)."
-        )
+        # Get description_text as additional context
+        async with self.pool.acquire() as conn:
+            desc = await conn.fetchval(
+                "SELECT description_text FROM conditions WHERE id = $1", condition_id
+            )
+
+        if not chunks and not desc and not features:
+            # No STG text at all — use Claude's medical knowledge for this condition.
+            # These are well-known conditions (Cholera, Meningitis, VDS, etc.) where
+            # the ingestion pipeline failed to extract content from the PDF.
+            prompt = (
+                f"CONDITION: {name} (STG {stg_code})\n\n"
+                f"This condition has NO extracted text from the STG guidelines and NO existing features.\n"
+                f"Based on your medical knowledge of this condition in a South African primary healthcare context:\n\n"
+                f"1. What symptoms would a patient present with? (patient-language terms)\n"
+                f"2. What are the key clinical features a nurse should look for?\n"
+                f"3. What synonym mappings would help match patient descriptions?\n\n"
+                f"Be thorough — this condition currently has ZERO searchable features.\n"
+                f"Focus on the most common presentation at a primary care clinic.\n"
+                f"Include both patient-language terms ('burning pee') and clinical terms ('dysuria')."
+            )
+        elif not chunks and desc:
+            prompt = (
+                f"CONDITION: {name} (STG {stg_code})\n\n"
+                f"EXISTING FEATURES ({len(features)} edges):\n"
+                + ("\n".join(existing_features) if existing_features else "(none)")
+                + f"\n\nDESCRIPTION:\n{desc}\n\n"
+                f"Identify gaps: patient-language symptoms missing from the graph, "
+                f"common symptoms mentioned in the text but not extracted, "
+                f"and proper synonym mappings (patient term → symptom canonical name)."
+            )
+        else:
+            prompt = (
+                f"CONDITION: {name} (STG {stg_code})\n\n"
+                f"EXISTING FEATURES ({len(features)} edges):\n"
+                + ("\n".join(existing_features) if existing_features else "(none)")
+                + f"\n\nSTG TEXT:\n{chunks_text}\n\n"
+                f"Identify gaps: patient-language symptoms missing from the graph, "
+                f"common symptoms mentioned in the text but not extracted, "
+                f"and proper synonym mappings (patient term → symptom canonical name)."
+            )
 
         # Call Haiku with tool_use
         response = self.client.messages.create(

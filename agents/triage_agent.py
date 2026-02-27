@@ -16,6 +16,7 @@ Agent loop:
 import asyncio
 import json
 import logging
+import re
 import anthropic
 import asyncpg
 from typing import Optional
@@ -23,6 +24,89 @@ from typing import Optional
 from agents.tools import TOOL_HANDLERS
 
 logger = logging.getLogger(__name__)
+
+
+# ── STG text formatting ──────────────────────────────────────────────────────
+
+def _format_stg_text(raw: str, max_summary: int = 300) -> dict:
+    """Format raw STG text into structured markdown with a concise summary.
+
+    Returns {"summary": str, "full": str}.
+    - summary: first meaningful sentences, capped at max_summary chars
+    - full: cleaned text with proper markdown bullet points and line breaks
+    """
+    if not raw or not raw.strip():
+        return {"summary": "", "full": ""}
+
+    text = raw.strip()
+
+    # Normalise bullet markers to markdown "- "
+    text = re.sub(r"^[»►•●]\s*", "- ", text, flags=re.MULTILINE)
+    text = re.sub(r"^[–—]\s+", "- ", text, flags=re.MULTILINE)
+
+    # Ensure blank line before bullet lists so markdown renders correctly
+    text = re.sub(r"([^\n])\n(- )", r"\1\n\n\2", text)
+
+    # Collapse 3+ consecutive blank lines to 2
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Build summary: first sentence-bounded chunk up to max_summary chars
+    # Split on double newlines first to get paragraphs
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    summary_parts = []
+    summary_len = 0
+    for para in paragraphs:
+        # Skip bullet-only paragraphs for the summary
+        if para.startswith("- "):
+            continue
+        # Split into sentences
+        sentences = re.split(r"(?<=[.!?])\s+", para)
+        for sent in sentences:
+            if summary_len + len(sent) > max_summary and summary_parts:
+                break
+            summary_parts.append(sent)
+            summary_len += len(sent) + 1
+        if summary_len >= max_summary:
+            break
+
+    summary = " ".join(summary_parts).strip()
+    if not summary and paragraphs:
+        # Fallback: just take first paragraph truncated
+        summary = paragraphs[0][:max_summary]
+        if len(paragraphs[0]) > max_summary:
+            summary = summary.rsplit(" ", 1)[0] + "..."
+
+    return {"summary": summary, "full": text}
+
+
+def _split_to_bullet_list(raw: str) -> list[str]:
+    """Split STG text into a list of individual items (for danger_signs, referral_criteria).
+
+    Handles bullet markers (», -, •), numbered items, and newline-separated entries.
+    Returns a list of clean strings.
+    """
+    if not raw or not raw.strip():
+        return []
+
+    text = raw.strip()
+
+    # Normalise bullet markers
+    text = re.sub(r"^[»►•●]\s*", "- ", text, flags=re.MULTILINE)
+    text = re.sub(r"^[–—]\s+", "- ", text, flags=re.MULTILINE)
+    text = re.sub(r"^\d+[.)]\s+", "- ", text, flags=re.MULTILINE)
+
+    items = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Strip leading "- " marker
+        if line.startswith("- "):
+            line = line[2:].strip()
+        if line and len(line) > 3:
+            items.append(line)
+
+    return items
 
 
 SYSTEM_PROMPT = """You are a clinical triage assistant for South African primary healthcare nurses.
@@ -305,14 +389,42 @@ class TriageAgent:
         logger.info(f"[{time.monotonic()-t0:.1f}s] Safety + details done (parallel)")
 
         # ── Step 3: Synthesis + safety review in parallel ────────────────
-        synthesis_task = asyncio.create_task(
-            self._synthesize_analyze(complaint, patient, vitals, core_history, tool_results)
+        # Fast-path: if top condition is dominant (score >> #2) and no red flags,
+        # skip the LLM synthesis call and use deterministic response builder.
+        verified = self._extract_verified_conditions(tool_results)
+        verified_sorted = sorted(
+            verified.values(), key=lambda v: v.get("score", 0), reverse=True
         )
-        safety_review_task = asyncio.create_task(
-            self._run_safety_review(complaint, patient, symptoms, conditions, acuity_info, vitals)
+        top_score = verified_sorted[0].get("score", 0) if verified_sorted else 0
+        second_score = verified_sorted[1].get("score", 0) if len(verified_sorted) > 1 else 0
+        safety_flags = tool_results.get("check_safety_flags", {})
+        has_flags = (
+            len(safety_flags.get("red_flags_triggered", [])) > 0
+            or len(safety_flags.get("vitals_flags", [])) > 0
         )
-        result, safety_review = await asyncio.gather(synthesis_task, safety_review_task)
-        logger.info(f"[{time.monotonic()-t0:.1f}s] Synthesis + safety done (parallel)")
+        use_fast_path = (
+            top_score > 0
+            and (second_score == 0 or top_score / max(second_score, 0.001) > 2.5)
+            and not has_flags
+            and acuity_info.get("acuity") == "routine"
+        )
+
+        if use_fast_path:
+            logger.info("Fast-path synthesis: dominant condition, no flags")
+            result = self._build_fallback_response(tool_results)
+            # Still run safety review (lightweight)
+            safety_review = await self._run_safety_review(
+                complaint, patient, symptoms, conditions, acuity_info, vitals, details
+            )
+        else:
+            synthesis_task = asyncio.create_task(
+                self._synthesize_analyze(complaint, patient, vitals, core_history, tool_results)
+            )
+            safety_review_task = asyncio.create_task(
+                self._run_safety_review(complaint, patient, symptoms, conditions, acuity_info, vitals, details)
+            )
+            result, safety_review = await asyncio.gather(synthesis_task, safety_review_task)
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Synthesis + safety done")
 
         # Merge safety review into result
         if safety_review and not safety_review.get("safe", True):
@@ -362,9 +474,18 @@ class TriageAgent:
             if stg_code not in final_codes:
                 continue
 
-            # Parse medicines into clean list
+            # Parse medicines into clean list + check for cautions
             meds = detail.get("medicines", [])
             medicine_list = []
+            medication_warnings = []
+            patient_meds_lower = [
+                m.strip().lower()
+                for m in (core_history or {}).get("medications", "").split(",")
+                if m.strip() and m.strip().lower() not in ("none", "nil", "n/a", "")
+            ]
+            patient_age = (patient or {}).get("age")
+            is_paediatric = patient_age is not None and patient_age < 18
+            is_pregnant = (patient or {}).get("pregnancy_status") == "yes"
             for m in (meds if isinstance(meds, list) else []):
                 med_entry = {
                     "name": m.get("name", ""),
@@ -372,8 +493,32 @@ class TriageAgent:
                     "dose": m.get("dose_context", ""),
                     "special_notes": m.get("special_notes", ""),
                 }
+                # Add paediatric dosing for child patients
+                if is_paediatric and m.get("paediatric_dose_mg_per_kg"):
+                    med_entry["paediatric_dose_mg_per_kg"] = m["paediatric_dose_mg_per_kg"]
+                    med_entry["paediatric_frequency"] = m.get("paediatric_frequency", "")
+                    if m.get("paediatric_note"):
+                        med_entry["paediatric_note"] = m["paediatric_note"]
+                # Add pregnancy safety for pregnant patients
+                if is_pregnant and m.get("pregnancy_safe") is not None:
+                    med_entry["pregnancy_safe"] = m["pregnancy_safe"]
+                    if m.get("pregnancy_notes"):
+                        med_entry["pregnancy_notes"] = m["pregnancy_notes"]
                 if med_entry["name"]:
                     medicine_list.append(med_entry)
+                    # Flag if patient is already on this medicine
+                    med_lower = med_entry["name"].lower()
+                    for pm in patient_meds_lower:
+                        if pm in med_lower or med_lower in pm:
+                            medication_warnings.append(
+                                f"Patient reports taking {pm} — already prescribed for this condition"
+                            )
+                    # Surface special notes with caution keywords
+                    notes = med_entry.get("special_notes", "") or ""
+                    if any(kw in notes.lower() for kw in ("avoid", "contraindic", "caution", "do not", "monitor")):
+                        medication_warnings.append(
+                            f"{med_entry['name']}: {notes[:150]}"
+                        )
 
             # Parse referral criteria
             referral = detail.get("referral_criteria", [])
@@ -383,15 +528,26 @@ class TriageAgent:
                 except (json.JSONDecodeError, TypeError):
                     referral = [referral] if referral else []
 
-            stg_guidelines[name] = {
+            desc = _format_stg_text(detail.get("description", ""))
+            gm = _format_stg_text(detail.get("general_measures", ""))
+            danger_signs_list = _split_to_bullet_list(
+                detail.get("danger_signs", "")
+            )
+
+            guideline_entry = {
                 "stg_code": stg_code,
-                "description": detail.get("description", ""),
-                "general_measures": detail.get("general_measures", ""),
-                "danger_signs": detail.get("danger_signs", ""),
+                "description": desc["summary"],
+                "description_full": desc["full"],
+                "general_measures": gm["summary"],
+                "general_measures_full": gm["full"],
+                "danger_signs": danger_signs_list,
                 "medicines": medicine_list,
                 "referral_criteria": referral,
                 "source_pages": detail.get("source_pages", []),
             }
+            if medication_warnings:
+                guideline_entry["medication_warnings"] = medication_warnings
+            stg_guidelines[name] = guideline_entry
         result["stg_guidelines"] = stg_guidelines
 
         return result
@@ -514,7 +670,7 @@ class TriageAgent:
 
     # ── Private helpers ──────────────────────────────────────────────────────
 
-    async def _run_safety_review(self, complaint, patient, symptoms, conditions, acuity_info, vitals=None):
+    async def _run_safety_review(self, complaint, patient, symptoms, conditions, acuity_info, vitals=None, condition_details=None):
         """Run safety review concurrently with synthesis using search results."""
         conditions_summary = [
             {"name": c.get("name", ""), "score": c.get("adjusted_score", 0)}
@@ -524,6 +680,15 @@ class TriageAgent:
         computed_reasons = acuity_info.get("reasons", [])
         reasons_str = ", ".join(computed_reasons) if computed_reasons else "none"
 
+        # Include danger signs from top 3 condition details so the reviewer
+        # can check whether any specific danger signs are present in symptoms
+        danger_signs_by_condition = {}
+        if condition_details:
+            for _cid, d in list(condition_details.items())[:3]:
+                ds = d.get("danger_signs", "")
+                if ds:
+                    danger_signs_by_condition[d.get("name", "?")] = ds[:300]
+
         review_input = json.dumps({
             "complaint": complaint,
             "patient": patient or {},
@@ -532,6 +697,7 @@ class TriageAgent:
             "computed_acuity_reasons": computed_reasons,
             "extracted_symptoms": symptoms,
             "conditions": conditions_summary,
+            "condition_danger_signs": danger_signs_by_condition,
         }, default=str)
 
         system_prompt = (
@@ -549,7 +715,9 @@ class TriageAgent:
             "2. You may ONLY escalate if you identify a SPECIFIC, NAMED red flag or danger sign that the "
             "automated system MISSED and that is PRESENT in the patient's stated symptoms.\n"
             "3. Do NOT infer symptoms the patient did not report.\n"
-            "4. If the computed acuity is correct, return {\"safe\": true}.\n\n"
+            "4. Check the condition_danger_signs field — if ANY of those danger signs match the patient's "
+            "stated symptoms, flag it as a concern and escalate accordingly.\n"
+            "5. If the computed acuity is correct, return {\"safe\": true}.\n\n"
             "Return JSON: {\"safe\":true} or "
             "{\"safe\":false,\"concerns\":[\"specific concern\"],\"corrected_acuity\":\"priority or urgent\","
             "\"missing_conditions\":[\"...\"]}"

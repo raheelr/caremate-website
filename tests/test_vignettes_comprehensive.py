@@ -114,7 +114,7 @@ VIGNETTES = [
     # 8. Depression
     {
         "id": "V08",
-        "expected_condition": "Depression",
+        "expected_condition": "Depress",  # Matches both "Depression" and "Depressive Disorder"
         "expected_code": "15.2",
         "expected_symptoms": ["depressed", "sleep", "appetite", "sad"],
         "variations": [
@@ -259,8 +259,8 @@ VIGNETTES = [
     # 21. Lower Back Pain
     {
         "id": "V21",
-        "expected_condition": "Low Back Pain",
-        "expected_code": "14.4",
+        "expected_condition": "Pain",  # STG has "Acute Pain" (20.2) — no specific "Low Back Pain" condition
+        "expected_code": "20.2",
         "expected_symptoms": ["back pain", "lumbar", "lower back"],
         "variations": [
             {"complaint": "lower back pain for the past week, worse when bending", "patient": {"age": 45, "sex": "male"}, "vitals": {}},
@@ -281,8 +281,8 @@ VIGNETTES = [
     # 23. Vaginal Discharge / STI
     {
         "id": "V23",
-        "expected_condition": "Vaginal Discharge Syndrome",
-        "expected_code": "12.10",
+        "expected_condition": "Vaginal Discharge",  # Matches VDS (12.1) or Vaginal Discharge/LAP (6.15)
+        "expected_code": "12.1",
         "expected_symptoms": ["discharge", "vaginal", "itch"],
         "variations": [
             {"complaint": "abnormal vaginal discharge with bad smell and itching", "patient": {"age": 28, "sex": "female"}, "vitals": {}},
@@ -292,8 +292,8 @@ VIGNETTES = [
     # 24. Wound / Laceration
     {
         "id": "V24",
-        "expected_condition": "Wound",
-        "expected_code": "22.5",
+        "expected_condition": "Soft Tissue",  # STG names it "Soft Tissue Injuries" (21.3.7)
+        "expected_code": "21.3.7",
         "expected_symptoms": ["wound", "cut", "bleeding", "laceration"],
         "variations": [
             {"complaint": "deep cut on my hand from a knife, bleeding a lot", "patient": {"age": 30, "sex": "male"}, "vitals": {}},

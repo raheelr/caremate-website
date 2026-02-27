@@ -91,9 +91,23 @@ async def save_condition(
         ON CONFLICT (stg_code) DO UPDATE SET
             name = EXCLUDED.name,
             icd10_codes = EXCLUDED.icd10_codes,
-            extraction_confidence = EXCLUDED.extraction_confidence,
+            description_text = CASE WHEN LENGTH(EXCLUDED.description_text) > LENGTH(COALESCE(conditions.description_text, ''))
+                                    THEN EXCLUDED.description_text ELSE conditions.description_text END,
+            general_measures = CASE WHEN LENGTH(EXCLUDED.general_measures) > LENGTH(COALESCE(conditions.general_measures, ''))
+                                    THEN EXCLUDED.general_measures ELSE conditions.general_measures END,
+            medicine_treatment = CASE WHEN LENGTH(EXCLUDED.medicine_treatment) > LENGTH(COALESCE(conditions.medicine_treatment, ''))
+                                      THEN EXCLUDED.medicine_treatment ELSE conditions.medicine_treatment END,
+            danger_signs = CASE WHEN LENGTH(EXCLUDED.danger_signs) > LENGTH(COALESCE(conditions.danger_signs, ''))
+                                THEN EXCLUDED.danger_signs ELSE conditions.danger_signs END,
+            referral_criteria = CASE WHEN LENGTH(EXCLUDED.referral_criteria::text) > LENGTH(COALESCE(conditions.referral_criteria::text, '[]'))
+                                     THEN EXCLUDED.referral_criteria ELSE conditions.referral_criteria END,
+            source_pages = COALESCE(EXCLUDED.source_pages, conditions.source_pages),
+            extraction_confidence = GREATEST(EXCLUDED.extraction_confidence, conditions.extraction_confidence),
             ambiguity_flags = EXCLUDED.ambiguity_flags,
             needs_review = EXCLUDED.needs_review,
+            applies_to_children = EXCLUDED.applies_to_children,
+            applies_to_adults = EXCLUDED.applies_to_adults,
+            applies_to_pregnant = COALESCE(EXCLUDED.applies_to_pregnant, conditions.applies_to_pregnant),
             updated_at = NOW()
         RETURNING id
     """,
@@ -285,9 +299,12 @@ async def _save_knowledge_chunks(
     condition_id: int,
     extraction: dict
 ):
-    """Save text chunks for vector search (embedding added later)."""
+    """Save text chunks for vector search (embedding added later).
+    Sets is_table=TRUE for Docling-extracted table chunks and
+    is_algorithm=TRUE for Vision-extracted flowchart chunks.
+    """
     sections = extraction.get('sections', {})
-    
+
     section_role_map = {
         'description': 'CLINICAL_PRESENTATION',
         'danger_signs': 'DANGER_SIGNS',
@@ -295,20 +312,105 @@ async def _save_knowledge_chunks(
         'medicine_treatment': 'DOSING_TABLE',
         'referral': 'REFERRAL',
     }
-    
+
+    source_page = extraction.get('source_pages', [None])[0]
+
+    standard_chunks_saved = 0
     for section_key, role in section_role_map.items():
         text = sections.get(section_key, '').strip()
         if not text or len(text) < 20:
             continue
-        
+
         await conn.execute("""
-            INSERT INTO knowledge_chunks (condition_id, chunk_text, section_role, source_page)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO knowledge_chunks (condition_id, chunk_text, section_role, source_page,
+                                          is_table, is_algorithm)
+            VALUES ($1, $2, $3, $4, FALSE, FALSE)
         """,
             condition_id,
             text,
             role,
-            extraction.get('source_pages', [None])[0]
+            source_page,
+        )
+        standard_chunks_saved += 1
+
+    # Fallback: if no standard sections had content, chunk the raw_text
+    # This catches conditions where Docling was primary and pdfplumber
+    # sections were empty (86 conditions in current extraction)
+    if standard_chunks_saved == 0:
+        raw_text = extraction.get('raw_text', '').strip()
+        if raw_text and len(raw_text) >= 20:
+            # Split into ~2000 char chunks to keep them manageable for vector search
+            max_chunk = 2000
+            if len(raw_text) <= max_chunk:
+                await conn.execute("""
+                    INSERT INTO knowledge_chunks (condition_id, chunk_text, section_role, source_page,
+                                                  is_table, is_algorithm)
+                    VALUES ($1, $2, 'CLINICAL_PRESENTATION', $3, FALSE, FALSE)
+                """,
+                    condition_id,
+                    raw_text,
+                    source_page,
+                )
+            else:
+                # Split on paragraph boundaries
+                paragraphs = raw_text.split('\n\n')
+                current_chunk = ''
+                chunk_num = 0
+                for para in paragraphs:
+                    if current_chunk and len(current_chunk) + len(para) + 2 > max_chunk:
+                        role = 'CLINICAL_PRESENTATION' if chunk_num == 0 else 'MANAGEMENT'
+                        await conn.execute("""
+                            INSERT INTO knowledge_chunks (condition_id, chunk_text, section_role, source_page,
+                                                          is_table, is_algorithm)
+                            VALUES ($1, $2, $3, $4, FALSE, FALSE)
+                        """,
+                            condition_id,
+                            current_chunk.strip(),
+                            role,
+                            source_page,
+                        )
+                        current_chunk = para
+                        chunk_num += 1
+                    else:
+                        current_chunk = current_chunk + '\n\n' + para if current_chunk else para
+                # Save final chunk
+                if current_chunk.strip() and len(current_chunk.strip()) >= 20:
+                    role = 'CLINICAL_PRESENTATION' if chunk_num == 0 else 'MANAGEMENT'
+                    await conn.execute("""
+                        INSERT INTO knowledge_chunks (condition_id, chunk_text, section_role, source_page,
+                                                      is_table, is_algorithm)
+                        VALUES ($1, $2, $3, $4, FALSE, FALSE)
+                    """,
+                        condition_id,
+                        current_chunk.strip(),
+                        role,
+                        source_page,
+                    )
+
+    # Save Docling table content as a separate chunk with is_table=TRUE
+    table_text = sections.get('_tables', '').strip()
+    if table_text and len(table_text) >= 20:
+        await conn.execute("""
+            INSERT INTO knowledge_chunks (condition_id, chunk_text, section_role, source_page,
+                                          is_table, is_algorithm)
+            VALUES ($1, $2, 'DOSING_TABLE', $3, TRUE, FALSE)
+        """,
+            condition_id,
+            table_text,
+            source_page,
+        )
+
+    # Save Vision flowchart content as a separate chunk with is_algorithm=TRUE
+    vision_text = sections.get('_vision', '').strip()
+    if vision_text and len(vision_text) >= 20:
+        await conn.execute("""
+            INSERT INTO knowledge_chunks (condition_id, chunk_text, section_role, source_page,
+                                          is_table, is_algorithm)
+            VALUES ($1, $2, 'CLINICAL_PRESENTATION', $3, FALSE, TRUE)
+        """,
+            condition_id,
+            vision_text,
+            source_page,
         )
 
 
@@ -367,11 +469,14 @@ async def get_conditions_for_symptoms(
     symptom_names: list[str],
     patient_is_child: bool = False,
     patient_is_pregnant: bool = False,
+    patient_sex: Optional[str] = None,
+    patient_age: Optional[int] = None,
     limit: int = 10
 ) -> list[dict]:
     """
     Find conditions that match a list of symptoms.
     Returns ranked list with match counts.
+    Filters by patient demographics (child, pregnant, sex, age).
     """
     rows = await conn.fetch("""
         SELECT
@@ -394,11 +499,41 @@ async def get_conditions_for_symptoms(
         AND cr.relationship_type IN ('INDICATES', 'RED_FLAG')
         AND ($2 = FALSE OR c.applies_to_children = TRUE)
         AND ($3 = FALSE OR c.applies_to_pregnant IS NOT FALSE)
+        AND ($5::text IS NULL
+             OR ($5 = 'male' AND c.applies_to_male IS NOT FALSE)
+             OR ($5 = 'female' AND c.applies_to_female IS NOT FALSE))
+        AND ($6::int IS NULL OR (c.min_age_years <= $6 AND c.max_age_years >= $6))
         GROUP BY c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
         ORDER BY raw_score DESC
         LIMIT $4
-    """, symptom_names, patient_is_child, patient_is_pregnant, limit)
-    
+    """, symptom_names, patient_is_child, patient_is_pregnant, limit,
+         patient_sex, patient_age)
+
+    return [dict(r) for r in rows]
+
+
+async def get_conditions_for_medications(
+    conn: asyncpg.Connection,
+    medication_names: list[str],
+) -> list[dict]:
+    """
+    Find conditions treated by the patient's current medications.
+    Uses the condition_medicines + medicines tables.
+    Returns conditions with the matched medication info.
+    """
+    if not medication_names:
+        return []
+
+    rows = await conn.fetch("""
+        SELECT DISTINCT c.id, c.stg_code, c.name, c.chapter_name,
+               m.name as medicine_name, cm.treatment_line
+        FROM condition_medicines cm
+        JOIN conditions c ON c.id = cm.condition_id
+        JOIN medicines m ON m.id = cm.medicine_id
+        WHERE m.name ILIKE ANY($1::text[])
+        ORDER BY c.name
+    """, [f"%{med.lower().strip()}%" for med in medication_names if med.strip()])
+
     return [dict(r) for r in rows]
 
 
@@ -416,7 +551,12 @@ async def get_condition_detail(
                     'dose_context', cm.dose_context,
                     'treatment_line', cm.treatment_line,
                     'age_group', cm.age_group,
-                    'special_notes', cm.special_notes
+                    'special_notes', cm.special_notes,
+                    'paediatric_dose_mg_per_kg', m.paediatric_dose_mg_per_kg,
+                    'paediatric_frequency', m.paediatric_frequency,
+                    'paediatric_note', m.paediatric_note,
+                    'pregnancy_safe', m.pregnancy_safe,
+                    'pregnancy_notes', m.pregnancy_notes
                 ))
                 FROM condition_medicines cm
                 JOIN medicines m ON m.id = cm.medicine_id
@@ -543,6 +683,30 @@ async def get_condition_prerequisites(
     return [dict(r) for r in rows]
 
 
+async def get_condition_prerequisites_batch(
+    conn: asyncpg.Connection,
+    condition_ids: list[int],
+) -> dict[int, list[dict]]:
+    """Get prerequisites for multiple conditions in one query.
+
+    Returns {condition_id: [{"prerequisite": ..., "description": ...}, ...]}.
+    """
+    if not condition_ids:
+        return {}
+    rows = await conn.fetch("""
+        SELECT condition_id, prerequisite, description
+        FROM condition_prerequisites
+        WHERE condition_id = ANY($1)
+    """, condition_ids)
+    result: dict[int, list[dict]] = {}
+    for r in rows:
+        cid = r["condition_id"]
+        result.setdefault(cid, []).append(
+            {"prerequisite": r["prerequisite"], "description": r["description"]}
+        )
+    return result
+
+
 async def get_condition_by_stg_code(
     conn: asyncpg.Connection,
     stg_code: str,
@@ -552,6 +716,100 @@ async def get_condition_by_stg_code(
         "SELECT * FROM conditions WHERE stg_code = $1", stg_code
     )
     return dict(row) if row else None
+
+
+async def get_vitals_mappings(
+    conn: asyncpg.Connection,
+    vitals: dict,
+) -> list[dict]:
+    """
+    Query vitals_condition_mapping for all thresholds matching the given vitals.
+    Returns matched mappings sorted by score_boost descending.
+    For each vital, picks the HIGHEST matching threshold (most specific).
+    """
+    if not vitals:
+        return []
+
+    results = []
+    for vital_name, value in vitals.items():
+        if value is None:
+            continue
+        # Query all matching thresholds for this vital
+        rows = await conn.fetch("""
+            SELECT vm.*, c.stg_code, c.name as condition_name,
+                   c.chapter_name, c.extraction_confidence
+            FROM vitals_condition_mapping vm
+            JOIN conditions c ON c.id = vm.condition_id
+            WHERE vm.vital_name = $1
+            AND (
+                (vm.operator = 'gte' AND $2::float >= vm.threshold)
+                OR (vm.operator = 'gt' AND $2::float > vm.threshold)
+                OR (vm.operator = 'lte' AND $2::float <= vm.threshold)
+                OR (vm.operator = 'lt' AND $2::float < vm.threshold)
+            )
+            ORDER BY vm.score_boost DESC
+        """, vital_name, float(value))
+
+        # Group by condition_id, keep highest score_boost per condition
+        seen = {}
+        for r in rows:
+            cid = r["condition_id"]
+            if cid not in seen or r["score_boost"] > seen[cid]["score_boost"]:
+                seen[cid] = dict(r)
+        results.extend(seen.values())
+
+    return sorted(results, key=lambda r: r["score_boost"], reverse=True)
+
+
+async def vector_search_conditions(
+    conn: asyncpg.Connection,
+    query_embedding: list[float],
+    patient_sex: Optional[str] = None,
+    patient_age: Optional[int] = None,
+    limit: int = 15,
+    min_similarity: float = 0.65,
+) -> list[dict]:
+    """
+    Vector search: find conditions whose knowledge chunks are semantically
+    similar to the query embedding. Returns conditions with similarity scores.
+    Respects gender and age filters.
+    """
+    vec_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+    rows = await conn.fetch("""
+        SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence,
+               kc.section_role,
+               1 - (kc.embedding <=> $1::vector) as similarity
+        FROM knowledge_chunks kc
+        JOIN conditions c ON c.id = kc.condition_id
+        WHERE kc.embedding IS NOT NULL
+        AND ($2::text IS NULL
+             OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
+             OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
+        AND ($3::int IS NULL OR (c.min_age_years <= $3 AND c.max_age_years >= $3))
+        ORDER BY kc.embedding <=> $1::vector
+        LIMIT $4
+    """, vec_str, patient_sex, patient_age, limit)
+
+    # Group by condition, keep best similarity per condition
+    seen = {}
+    for r in rows:
+        sim = float(r["similarity"])
+        if sim < min_similarity:
+            continue
+        cid = r["id"]
+        if cid not in seen or sim > seen[cid]["similarity"]:
+            seen[cid] = {
+                "id": r["id"],
+                "stg_code": r["stg_code"],
+                "name": r["name"],
+                "chapter_name": r["chapter_name"],
+                "extraction_confidence": float(r["extraction_confidence"] or 1.0),
+                "similarity": sim,
+                "best_section": r["section_role"],
+            }
+
+    return sorted(seen.values(), key=lambda x: x["similarity"], reverse=True)
 
 
 async def search_knowledge_chunks(
