@@ -107,12 +107,19 @@ _NON_DISEASE_KEYWORDS = {"vaccine", "vaccination", "immunisation", "immunization
 
 
 def _penalize_non_disease(conditions: list[dict], complaint: str) -> list[dict]:
-    """Penalize non-disease conditions (immunisation, counseling) that matched
-    on side effects rather than patient intent."""
+    """Remove non-disease conditions (immunisation, counseling) that matched
+    on side effects rather than patient intent.
+
+    If the complaint mentions vaccines/immunisation, keep them.
+    Otherwise, filter them out entirely — a penalty is not enough because
+    immunisation conditions have many side-effect edges that generate high
+    raw scores for common symptoms like headache, dizziness, body aches.
+    """
     complaint_lower = complaint.lower()
-    # If the complaint mentions vaccines/immunisation, don't penalize
+    # If the complaint mentions vaccines/immunisation, keep all conditions
     if any(kw in complaint_lower for kw in _NON_DISEASE_KEYWORDS):
         return conditions
+    filtered = []
     for c in conditions:
         # chapter_name is a string like "Chapter 13: Immunisation"
         chapter_name = c.get("chapter_name") or c.get("chapter") or ""
@@ -123,9 +130,9 @@ def _penalize_non_disease(conditions: list[dict], complaint: str) -> list[dict]:
             m = re.match(r"(?:Chapter\s+)?(\d+)", chapter_name, re.IGNORECASE)
             if m:
                 chapter_num = int(m.group(1))
-        if chapter_num in _NON_DISEASE_CHAPTERS:
-            c["adjusted_score"] = round(c.get("adjusted_score", 0) * 0.4, 3)
-    return conditions
+        if chapter_num not in _NON_DISEASE_CHAPTERS:
+            filtered.append(c)
+    return filtered
 
 
 async def _filter_parent_headings(conn, conditions: list[dict]) -> list[dict]:

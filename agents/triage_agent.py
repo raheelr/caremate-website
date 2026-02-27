@@ -190,14 +190,13 @@ def _format_stg_text(raw: str, max_summary: int = 300) -> dict:
     # Collapse 3+ consecutive blank lines to 2
     text = re.sub(r"\n{3,}", "\n\n", text)
 
-    # Build summary: first sentence-bounded chunk up to max_summary chars
-    # Split on double newlines first to get paragraphs
+    # Build summary: first prose sentences only (skip bullets, headers, tables)
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     summary_parts = []
     summary_len = 0
     for para in paragraphs:
-        # Skip bullet-only paragraphs for the summary
-        if para.startswith("- "):
+        # Skip non-prose content for the summary
+        if para.startswith("- ") or para.startswith("## ") or "|" in para:
             continue
         # Split into sentences
         sentences = re.split(r"(?<=[.!?])\s+", para)
@@ -211,7 +210,7 @@ def _format_stg_text(raw: str, max_summary: int = 300) -> dict:
 
     summary = " ".join(summary_parts).strip()
     if not summary and paragraphs:
-        # Fallback: just take first paragraph truncated
+        # Fallback: first paragraph truncated
         summary = paragraphs[0][:max_summary]
         if len(paragraphs[0]) > max_summary:
             summary = summary.rsplit(" ", 1)[0] + "..."
