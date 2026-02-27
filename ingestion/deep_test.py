@@ -860,11 +860,28 @@ async def synonym_search(conn: asyncpg.Connection, symptoms: list[str]) -> list[
             canonical = r["canonical_term"]
 
             # Find conditions matching this canonical term
+            # Step 1: Direct condition name match
             conds = await conn.fetch("""
                 SELECT id, name, stg_code FROM conditions
                 WHERE name ILIKE $1
                 LIMIT 5
             """, f"%{canonical}%")
+            score_per_hit = 0.20  # direct name match
+
+            # Step 2: Two-hop entity resolution if name match fails
+            # canonical → clinical_entity → clinical_relationships → condition
+            if not conds:
+                conds = await conn.fetch("""
+                    SELECT DISTINCT c.id, c.name, c.stg_code
+                    FROM clinical_entities ce
+                    JOIN clinical_relationships cr
+                        ON (cr.source_entity_id = ce.id OR cr.target_entity_id = ce.id)
+                    JOIN conditions c ON cr.condition_id = c.id
+                    WHERE ce.canonical_name ILIKE $1
+                    AND cr.feature_type IN ('presenting_feature', 'diagnostic_feature')
+                    LIMIT 10
+                """, f"%{canonical}%")
+                score_per_hit = 0.15  # indirect two-hop match
 
             for c in conds:
                 cid = c["id"]
@@ -877,7 +894,7 @@ async def synonym_search(conn: asyncpg.Connection, symptoms: list[str]) -> list[
                         "matched_symptoms": set(),
                         "method": "synonym",
                     }
-                results[cid]["score"] += 0.20 * idf
+                results[cid]["score"] += score_per_hit * idf
                 results[cid]["matched_symptoms"].add(term)
 
     # Multi-symptom match bonus

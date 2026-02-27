@@ -588,6 +588,99 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
             # Graceful degradation — vector search is optional
             logger.debug(f"Vector search skipped: {e}")
 
+        # Synonym search: patient-language → canonical → condition
+        # Uses synonym_rings (fuzzy both directions) + two-hop entity resolution
+        # when canonical is a concept (not a condition name).
+        synonym_matches = {}  # condition_id -> {row, terms}
+        for orig_term in original_symptoms:
+            term = orig_term.lower().strip()
+            if len(term) < 3:
+                continue
+            syn_rows = await conn.fetch("""
+                SELECT DISTINCT sr.canonical_term
+                FROM synonym_rings sr
+                WHERE sr.synonym ILIKE $1
+                   OR ($2 ILIKE '%' || sr.synonym || '%' AND length(sr.synonym) >= 4)
+            """, f"%{term}%", term)
+
+            for sr in syn_rows:
+                canonical = sr["canonical_term"]
+                # Step 1: Direct condition name match
+                cond_rows = await conn.fetch("""
+                    SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
+                    FROM conditions c WHERE c.name ILIKE $1
+                    AND ($2::text IS NULL
+                         OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
+                         OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
+                    LIMIT 5
+                """, f"%{canonical}%", patient_sex)
+
+                # Step 2: Two-hop entity resolution if name match fails
+                if not cond_rows:
+                    cond_rows = await conn.fetch("""
+                        SELECT DISTINCT c.id, c.stg_code, c.name, c.chapter_name,
+                               c.extraction_confidence
+                        FROM clinical_entities ce
+                        JOIN clinical_relationships cr
+                            ON (cr.source_entity_id = ce.id OR cr.target_entity_id = ce.id)
+                        JOIN conditions c ON cr.condition_id = c.id
+                        WHERE ce.canonical_name ILIKE $1
+                        AND cr.feature_type IN ('presenting_feature', 'diagnostic_feature')
+                        AND ($2::text IS NULL
+                             OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
+                             OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
+                        LIMIT 10
+                    """, f"%{canonical}%", patient_sex)
+
+                for row in cond_rows:
+                    cid = row["id"]
+                    if cid not in synonym_matches:
+                        synonym_matches[cid] = {"row": dict(row), "terms": set()}
+                    synonym_matches[cid]["terms"].add(orig_term)
+
+        # Score and add/boost synonym results
+        existing_by_id = {c["id"]: c for c in conditions}
+        existing_ids = {c["id"] for c in conditions}
+        for cid, data in sorted(
+            synonym_matches.items(),
+            key=lambda x: len(x[1]["terms"]),
+            reverse=True,
+        ):
+            n_terms = len(data["terms"])
+            syn_score = min(0.20 * n_terms, 0.90)
+            matched_terms = sorted(data["terms"])
+
+            if cid in existing_by_id:
+                existing = existing_by_id[cid]
+                if syn_score > existing.get("adjusted_score", 0):
+                    existing["adjusted_score"] = syn_score
+                    existing["raw_score"] = max(existing.get("raw_score", 0), syn_score)
+                    existing["symptom_groups_matched"] = max(
+                        existing.get("symptom_groups_matched", 0), n_terms
+                    )
+                feat = f"{', '.join(matched_terms)} (synonym match)"
+                if feat not in existing.get("matched_features", []):
+                    existing.setdefault("matched_features", []).append(feat)
+            elif cid not in existing_ids:
+                row = data["row"]
+                conditions.append({
+                    "id": row["id"],
+                    "stg_code": row["stg_code"],
+                    "name": row["name"],
+                    "chapter_name": row["chapter_name"],
+                    "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                    "match_count": n_terms,
+                    "raw_score": syn_score,
+                    "matched_features": [
+                        f"{t} (synonym match)" for t in matched_terms
+                    ],
+                    "symptom_groups_matched": n_terms,
+                    "adjusted_score": syn_score,
+                })
+                existing_ids.add(cid)
+
+        logger.info(f"Synonym search: {len(synonym_matches)} conditions matched")
+
         # Fallback 1: condition NAME matching — if search terms appear in the
         # condition name, include/boost it. Aggregates across ALL terms so multi-term
         # matches score higher (e.g. "vaginal discharge" → "Vaginal Discharge Syndrome").
