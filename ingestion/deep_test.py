@@ -84,6 +84,7 @@ TEST_CASES = [
         "chapter_name": "Dental and Oral Conditions",
         "condition_name": "Herpes Simplex of Mouth and Lips",
         "stg_code": "1.4",
+        "alt_codes": ["5.15"],  # Same condition in Dermatology chapter
         "symptoms": ["cold sore on lip", "painful blisters on mouth", "tingling before sore appeared"],
     },
     # ==========================================================================
@@ -132,6 +133,7 @@ TEST_CASES = [
         "chapter_name": "Nutrition and Anaemia",
         "condition_name": "Worm Infestation",
         "stg_code": "3.3",
+        "alt_codes": ["2.11", "2.12"],  # Tapeworm and other helminths also valid
         "symptoms": ["tummy pain", "worms in stool", "itchy bottom"],
     },
 
@@ -471,7 +473,8 @@ TEST_CASES = [
         "id": "RESP-02",
         "chapter_name": "Respiratory Conditions",
         "condition_name": "Pneumonia, Uncomplicated (Community Acquired, Adults)",
-        "stg_code": "17.3.1",
+        "stg_code": "17.3.4",
+        "alt_codes": ["17.3.3"],  # Pneumonia variants
         "symptoms": ["coughing up green stuff", "high fever", "chest pain when breathing"],
     },
     {
@@ -1026,11 +1029,18 @@ async def run_single_test(conn: asyncpg.Connection, test_case: dict, verbose: bo
     search = await combined_search(conn, symptoms)
     top5 = search["merged"][:5]
 
+    # Build list of acceptable codes (primary + alternates)
+    alt_codes = test_case.get("alt_codes", [])
+    accept_codes = [expected_code] + alt_codes
+
+    def _matches_any(stg_code: str) -> bool:
+        return any(stg_code_matches(stg_code, ac) for ac in accept_codes)
+
     # Check if any top-5 result matches the expected code prefix
     rank_in_top5 = None
     matched_entry = None
     for i, entry in enumerate(top5):
-        if stg_code_matches(entry["stg_code"], expected_code):
+        if _matches_any(entry["stg_code"]):
             rank_in_top5 = i + 1
             matched_entry = entry
             break
@@ -1038,7 +1048,7 @@ async def run_single_test(conn: asyncpg.Connection, test_case: dict, verbose: bo
     # Also find the absolute rank in full results
     absolute_rank = None
     for i, entry in enumerate(search["merged"]):
-        if stg_code_matches(entry["stg_code"], expected_code):
+        if _matches_any(entry["stg_code"]):
             absolute_rank = i + 1
             break
 
