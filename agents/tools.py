@@ -98,14 +98,17 @@ def _apply_prevalence_boost(conditions: list[dict]) -> list[dict]:
 
 async def _filter_parent_headings(conn, conditions: list[dict]) -> list[dict]:
     """
-    Remove parent heading conditions when a populated child exists.
-    E.g., "4.7 Hypertension" is removed if "4.7.1 Hypertension In Adults" exists
-    with non-empty description_text.
+    Replace parent heading conditions with their best populated child.
+    E.g., "4.7 Hypertension" → replaced with "4.7.1 Hypertension In Adults"
+    which has actual description_text and clinical content.
+
+    If the child already exists in results, the parent is simply removed.
     """
     codes = [c.get("stg_code", "") for c in conditions if c.get("stg_code")]
     if not codes:
         return conditions
 
+    # Find which codes are parents (have a child with content)
     rows = await conn.fetch("""
         SELECT DISTINCT parent_code FROM (
             SELECT unnest($1::text[]) as parent_code
@@ -122,11 +125,48 @@ async def _filter_parent_headings(conn, conditions: list[dict]) -> list[dict]:
     if not parent_codes:
         return conditions
 
-    filtered = [c for c in conditions if c.get("stg_code", "") not in parent_codes]
-    if len(filtered) < len(conditions):
-        removed = len(conditions) - len(filtered)
-        logger.info(f"Filtered {removed} parent heading condition(s) from results")
-    return filtered
+    # For each parent, find the best child to replace it with
+    child_map = {}  # parent_code → child condition row
+    for pc in parent_codes:
+        child = await conn.fetchrow("""
+            SELECT id, stg_code, name, chapter_name, extraction_confidence
+            FROM conditions
+            WHERE stg_code LIKE $1 || '.%'
+              AND stg_code != $1
+              AND description_text IS NOT NULL
+              AND TRIM(description_text) != ''
+            ORDER BY length(description_text) DESC
+            LIMIT 1
+        """, pc)
+        if child:
+            child_map[pc] = dict(child)
+
+    existing_codes = {c.get("stg_code", "") for c in conditions}
+    result = []
+    replaced = 0
+    for c in conditions:
+        code = c.get("stg_code", "")
+        if code in parent_codes:
+            child = child_map.get(code)
+            if child and child["stg_code"] not in existing_codes:
+                # Replace parent with child, keeping the parent's score
+                replacement = dict(c)
+                replacement["id"] = child["id"]
+                replacement["stg_code"] = child["stg_code"]
+                replacement["name"] = child["name"]
+                replacement["chapter_name"] = child.get("chapter_name", c.get("chapter_name", ""))
+                replacement["extraction_confidence"] = float(child.get("extraction_confidence", 1.0) or 1.0)
+                result.append(replacement)
+                existing_codes.add(child["stg_code"])
+                replaced += 1
+            # else: child already in results, just drop the parent
+        else:
+            result.append(c)
+
+    if replaced or len(result) < len(conditions):
+        logger.info(f"Parent headings: {replaced} replaced, "
+                     f"{len(conditions) - len(result)} removed")
+    return result
 
 
 # ── Tool Definitions (Anthropic tool_use JSON schemas) ───────────────────────

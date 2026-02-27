@@ -566,7 +566,9 @@ class TriageAgent:
 
         # ── Add structured STG guidelines only for conditions in result ────
         # Uses condition details already fetched in step 2c — no extra DB calls
-        final_codes = {c.get("condition_code") for c in result.get("conditions", [])}
+        final_conditions = result.get("conditions", [])
+        final_codes = {c.get("condition_code") for c in final_conditions}
+        final_names = {c.get("name", "").lower() for c in final_conditions}
         stg_guidelines = {}
         for cid, detail in details.items():
             if detail.get("error"):
@@ -575,7 +577,8 @@ class TriageAgent:
             stg_code = detail.get("stg_code", "")
 
             # Only include STG data for conditions that made it to the final result
-            if stg_code not in final_codes:
+            # Match on exact code OR condition name (handles code variants like 4.7 vs 4.7.1)
+            if stg_code not in final_codes and name.lower() not in final_names:
                 continue
 
             # Parse medicines into clean list + check for cautions
