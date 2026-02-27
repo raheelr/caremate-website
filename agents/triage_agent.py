@@ -48,14 +48,39 @@ def _clean_stg_references(text: str) -> str:
     # Strip evidence level markers: LoE:IIb41, LoE:IIIb16, LoE: IVb15, etc.
     text = re.sub(r"\s*LoE:\s*[A-Za-z0-9]+", "", text)
 
+    # ── Parenthetical cross-references (handle FIRST to avoid orphaned text) ──
+    # "(See Section 4.1: Prevention of ...)" → removed entirely
+    text = re.sub(
+        r"\s*\(\s*[Ss]ee\s+[Ss]ection\s+[\d.]+(?::\s*[^)]+)?\s*\)",
+        "",
+        text,
+    )
+    # "(See Chapter 11: HIV and AIDS)" → removed entirely
+    text = re.sub(
+        r"\s*\(\s*[Ss]ee\s+[Cc]hapter\s+\d+(?::\s*[^)]+)?\s*\)",
+        "",
+        text,
+    )
+    # "(Refer to Section 11.8.2: Candidiasis)" → removed entirely
+    text = re.sub(
+        r"\s*\(\s*[Rr]efer\s+to\s+[Ss]ection\s+[\d.]+(?::\s*[^)]+)?\s*\)",
+        "",
+        text,
+    )
+    # "(See Table 4.5: Treatment of...)" → removed entirely
+    text = re.sub(
+        r"\s*\(\s*[Ss]ee\s+[Tt]able\s+[\d.]+(?::\s*[^)]+)?\s*\)",
+        "",
+        text,
+    )
+
+    # ── Non-parenthetical cross-references ──
     # "See Section 4.1: Prevention of ..." → "(Ref: Section 4.1)"
-    # Keep the section number for traceability but drop the nav instruction
     text = re.sub(
         r"[Ss]ee [Ss]ection\s+([\d.]+):\s*[^.)\n]+",
         r"(Ref: Section \1)",
         text,
     )
-    # "See Section 4.1" without colon
     text = re.sub(
         r"[Ss]ee [Ss]ection\s+([\d.]+)",
         r"(Ref: Section \1)",
@@ -74,7 +99,7 @@ def _clean_stg_references(text: str) -> str:
         text,
     )
 
-    # "Refer to Section 11.8.2: Candidiasis" → "(Ref: Section 11.8.2)"
+    # "Refer to Section/Figure" variants
     text = re.sub(
         r"[Rr]efer to [Ss]ection\s+([\d.]+):\s*[^.)\n]+",
         r"(Ref: Section \1)",
@@ -85,8 +110,6 @@ def _clean_stg_references(text: str) -> str:
         r"(Ref: Section \1)",
         text,
     )
-
-    # "Refer to Figure 11.1 below." → remove entirely
     text = re.sub(
         r"\s*\(?[Rr]efer to [Ff]igure\s+[\d.]+\s*(below|above)?\s*\.?\)?\s*",
         " ",
@@ -112,7 +135,18 @@ def _clean_stg_references(text: str) -> str:
         text,
     )
 
-    # Fix double parens: ((Ref: Section 11.1)) → (Ref: Section 11.1)
+    # ── Convert ALL-CAPS section headers to markdown headers ──
+    # "CLINICAL PRESENTATION" → "## Clinical Presentation"
+    # "MONITORING AND FOLLOW-UP" → "## Monitoring And Follow-Up"
+    text = re.sub(
+        r"^([A-Z][A-Z\s&/,\-]{4,})$",
+        lambda m: "## " + m.group(1).strip().title(),
+        text,
+        flags=re.MULTILINE,
+    )
+
+    # ── Cleanup ──
+    # Fix double/nested parens from removals
     text = re.sub(r"\(\(Ref:", "(Ref:", text)
     text = re.sub(r"\)\)", ")", text)
 
@@ -126,6 +160,8 @@ def _clean_stg_references(text: str) -> str:
     text = re.sub(r"\s+(for|of|to|from|in|on|with|and|or)\s*\.", ".", text)
     # Clean up space before punctuation: " ." → "." and " ," → ","
     text = re.sub(r"\s+([.,;:])", r"\1", text)
+    # Remove blank lines at start of text
+    text = re.sub(r"^\s*\n", "", text)
 
     return text.strip()
 
@@ -468,7 +504,7 @@ class TriageAgent:
 
         # 2c. Parallel: safety flags + condition details + vitals acuity
         condition_ids = [c["id"] for c in conditions[:15]]
-        top_ids = [c["id"] for c in conditions[:5]]
+        top_ids = [c["id"] for c in conditions[:10]]
 
         async def _get_safety():
             if not condition_ids:
@@ -565,10 +601,34 @@ class TriageAgent:
         result["extracted_symptoms"] = symptoms
 
         # ── Add structured STG guidelines only for conditions in result ────
-        # Uses condition details already fetched in step 2c — no extra DB calls
         final_conditions = result.get("conditions", [])
         final_codes = {c.get("condition_code") for c in final_conditions}
-        final_names = {c.get("name", "").lower() for c in final_conditions}
+        final_names = {c.get("condition_name", c.get("name", "")).lower() for c in final_conditions}
+
+        # Backfill: fetch details for any final conditions not already in details
+        detail_codes = {d.get("stg_code") for d in details.values() if not d.get("error")}
+        detail_names = {d.get("name", "").lower() for d in details.values() if not d.get("error")}
+        for fc in final_conditions:
+            fc_code = fc.get("condition_code", "")
+            fc_name = (fc.get("condition_name") or fc.get("name", "")).lower()
+            if fc_code in detail_codes or fc_name in detail_names:
+                continue
+            # Missing — look up and fetch
+            try:
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT id FROM conditions WHERE stg_code = $1 LIMIT 1", fc_code
+                    )
+                if row:
+                    d = await TOOL_HANDLERS["get_condition_detail"](
+                        {"condition_id": row["id"]}, self.pool
+                    )
+                    details[row["id"]] = d
+                    detail_codes.add(d.get("stg_code"))
+                    detail_names.add(d.get("name", "").lower())
+            except Exception as e:
+                logger.warning(f"Failed to backfill detail for {fc_code}: {e}")
+
         stg_guidelines = {}
         for cid, detail in details.items():
             if detail.get("error"):

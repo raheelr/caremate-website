@@ -540,8 +540,8 @@ async def get_conditions_for_medications(
 async def get_condition_rich_content(
     conn: asyncpg.Connection,
     condition_id: int,
-    max_chunks: int = 3,
-    max_chars: int = 4000,
+    max_chunks: int = 4,
+    max_chars: int = 8000,
 ) -> list[dict]:
     """Get table and algorithm chunks for a condition.
 
