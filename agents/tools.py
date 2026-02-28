@@ -121,13 +121,19 @@ def _penalize_non_disease(conditions: list[dict], complaint: str) -> list[dict]:
         return conditions
     filtered = []
     for c in conditions:
-        # chapter_name is a string like "Chapter 13: Immunisation"
+        # Check chapter number from chapter_name or stg_code prefix
         chapter_name = c.get("chapter_name") or c.get("chapter") or ""
+        stg_code = c.get("stg_code", "")
         chapter_num = None
         if isinstance(chapter_name, int):
             chapter_num = chapter_name
         elif isinstance(chapter_name, str):
             m = re.match(r"(?:Chapter\s+)?(\d+)", chapter_name, re.IGNORECASE)
+            if m:
+                chapter_num = int(m.group(1))
+        # Fallback: extract chapter from stg_code (e.g., "13.7" → chapter 13)
+        if chapter_num is None and stg_code:
+            m = re.match(r"(\d+)\.", stg_code)
             if m:
                 chapter_num = int(m.group(1))
         if chapter_num not in _NON_DISEASE_CHAPTERS:
@@ -988,6 +994,11 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
         # Re-sort and limit
         conditions.sort(key=lambda c: (c.get("adjusted_score", 0), c.get("raw_score", 0)), reverse=True)
         conditions = conditions[:limit]
+
+        # Re-apply non-disease penalty to the final merged result.
+        # The first pass runs after graph search but synonym/fallback stages
+        # can re-introduce immunisation/counselling conditions.
+        conditions = _penalize_non_disease(conditions, complaint_text)
 
         # Filter out parent headings (e.g., 4.7) when populated children exist (4.7.1)
         conditions = await _filter_parent_headings(conn, conditions)

@@ -22,7 +22,7 @@ import asyncpg
 from typing import Optional
 
 from agents.tools import TOOL_HANDLERS
-from db.database import get_condition_rich_content
+from db.database import get_condition_rich_content, get_condition_features_batch
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +370,26 @@ OTHER RULES:
 """
 
 
+SLIM_ASSESSMENT_PROMPT = """Re-rank these conditions by clinical likelihood and generate assessment questions.
+
+Complaint: {complaint} | Patient: {patient}
+
+Conditions (from STG search, current order by feature-match score):
+{conditions_summary}
+
+TASK 1 — RANK: Re-order ALL conditions by clinical likelihood given the specific complaint,
+patient age/sex, and vitals. Consider epidemiology and pre-test probability.
+Conditions marked "(vitals-based)" MUST stay at rank 1.
+
+TASK 2 — QUESTIONS: Generate 4-5 yes/no questions to differentiate between top conditions.
+Each question should target a feature PRESENT in one condition but ABSENT in the others.
+Prioritise: (1) danger signs, (2) diagnostic criteria, (3) distinguishing features.
+Do NOT ask about symptoms already in the complaint.
+
+Return ONLY valid JSON (ranked_codes must list ALL condition codes in your preferred order):
+{{"ranked_codes":["code1","code2","..."],"questions":[{{"id":"q1","question":"Does...?","type":"yes_no","required":false,"round":1,"source_citation":"STG X.Y","grounding":"verified"}}]}}"""
+
+
 class TriageAgent:
 
     def __init__(self, pool: asyncpg.Pool):
@@ -527,13 +547,44 @@ class TriageAgent:
         tool_results["vitals_acuity"] = acuity_info
         logger.info(f"[{time.monotonic()-t0:.1f}s] Safety + details done (parallel)")
 
-        # ── Step 3: Synthesis + safety review in parallel ────────────────
-        # Fast-path: if top condition is dominant (score >> #2) and no red flags,
-        # skip the LLM synthesis call and use deterministic response builder.
+        # ── Step 3: Build response (mostly deterministic) ────────────────
+        # Pre-compute condition_symptoms from DB, then run slim LLM call
+        # for assessment_questions only (~200 tokens vs ~2500 for full synthesis).
         verified = self._extract_verified_conditions(tool_results)
         verified_sorted = sorted(
             verified.values(), key=lambda v: v.get("score", 0), reverse=True
         )
+
+        # Promote vitals-injected conditions to the top
+        for i, v in enumerate(verified_sorted):
+            features = v.get("matched_features", [])
+            if any("vitals-based" in f for f in features):
+                if i > 0:
+                    verified_sorted.insert(0, verified_sorted.pop(i))
+                break
+
+        # Build condition_id map for DB lookups
+        condition_id_map: dict[str, int] = {}
+        for c in conditions:
+            if c.get("stg_code") and c.get("id"):
+                condition_id_map[c["stg_code"]] = c["id"]
+
+        # Fetch clinical features for top conditions (single batch query)
+        top_cids = [
+            condition_id_map[v["stg_code"]]
+            for v in verified_sorted[:5]
+            if v["stg_code"] in condition_id_map
+        ]
+        async with self.pool.acquire() as conn:
+            features_by_condition = await get_condition_features_batch(conn, top_cids)
+
+        # Build condition_symptoms from DB features (instant, no LLM)
+        reported_symptoms = set(symptoms)
+        condition_symptoms = self._build_condition_symptoms(
+            verified_sorted, features_by_condition, condition_id_map, reported_symptoms
+        )
+
+        # Fast-path check (expanded threshold: 1.5x instead of 2.5x)
         top_score = verified_sorted[0].get("score", 0) if verified_sorted else 0
         second_score = verified_sorted[1].get("score", 0) if len(verified_sorted) > 1 else 0
         safety_flags = tool_results.get("check_safety_flags", {})
@@ -543,26 +594,73 @@ class TriageAgent:
         )
         use_fast_path = (
             top_score > 0
-            and (second_score == 0 or top_score / max(second_score, 0.001) > 2.5)
+            and (second_score == 0 or top_score / max(second_score, 0.001) > 1.5)
             and not has_flags
             and acuity_info.get("acuity") == "routine"
         )
 
-        if use_fast_path:
-            logger.info("Fast-path synthesis: dominant condition, no flags")
-            result = self._build_fallback_response(tool_results)
-            # Still run safety review (lightweight)
-            safety_review = await self._run_safety_review(
+        # Run assessment questions LLM + safety review in parallel
+        safety_review_task = asyncio.create_task(
+            self._run_safety_review(
                 complaint, patient, symptoms, conditions, acuity_info, vitals, details
             )
+        )
+
+        ranked_codes: list[str] = []
+        if use_fast_path:
+            logger.info("Fast-path: dominant condition, no flags, skipping LLM")
+            assessment_questions: list[dict] = []
+            safety_review = await safety_review_task
         else:
-            synthesis_task = asyncio.create_task(
-                self._synthesize_analyze(complaint, patient, vitals, core_history, tool_results)
+            # Slim LLM call: re-rank + assessment questions (~200 output tokens)
+            assessment_task = asyncio.create_task(
+                self._generate_assessment_questions(
+                    complaint, patient, verified_sorted,
+                    features_by_condition, condition_id_map,
+                )
             )
-            safety_review_task = asyncio.create_task(
-                self._run_safety_review(complaint, patient, symptoms, conditions, acuity_info, vitals, details)
+            (ranked_codes, assessment_questions), safety_review = await asyncio.gather(
+                assessment_task, safety_review_task
             )
-            result, safety_review = await asyncio.gather(synthesis_task, safety_review_task)
+
+        # Build full response deterministically
+        result = self._build_full_response(
+            tool_results, condition_symptoms, assessment_questions
+        )
+
+        # Apply LLM re-ranking if available
+        if ranked_codes:
+            result_conds = result.get("conditions", [])
+            cond_by_code = {c["condition_code"]: c for c in result_conds}
+            reordered = []
+            for code in ranked_codes:
+                if code in cond_by_code:
+                    reordered.append(cond_by_code.pop(code))
+            # Append any conditions not in ranked_codes (preserves original order)
+            for c in result_conds:
+                if c["condition_code"] in cond_by_code:
+                    reordered.append(c)
+            result["conditions"] = reordered
+            logger.info(f"LLM re-ranked conditions: {ranked_codes[:5]}")
+
+        # Enforce vitals-injected conditions at top (overrides LLM ranking)
+        vitals_codes = set()
+        for v in verified_sorted:
+            if any("vitals-based" in f for f in v.get("matched_features", [])):
+                vitals_codes.add(v["stg_code"])
+        if vitals_codes:
+            result_conds = result.get("conditions", [])
+            vitals_conds = [c for c in result_conds if c.get("condition_code") in vitals_codes]
+            other_conds = [c for c in result_conds if c.get("condition_code") not in vitals_codes]
+            result["conditions"] = vitals_conds + other_conds
+
+        # Recalculate confidence based on final position (top=0.90, decreasing)
+        if ranked_codes or vitals_codes:
+            final_conds = result.get("conditions", [])
+            conf_values = [0.90, 0.78, 0.65, 0.52, 0.40]
+            for i, c in enumerate(final_conds):
+                c["confidence"] = conf_values[i] if i < len(conf_values) else 0.30
+
         logger.info(f"[{time.monotonic()-t0:.1f}s] Synthesis + safety done")
 
         # Merge safety review into result
@@ -576,8 +674,6 @@ class TriageAgent:
             if corrected:
                 acuity_rank = {"routine": 0, "priority": 1, "urgent": 2}
                 if acuity_rank.get(corrected, 0) > acuity_rank.get(result.get("acuity", "routine"), 0):
-                    # Escalation guard: if vitals are normal AND no deterministic red flags
-                    # were found, cap speculative escalation at "priority" (not "urgent")
                     safety_flags = tool_results.get("check_safety_flags", {})
                     has_deterministic_flags = (
                         len(safety_flags.get("red_flags_triggered", [])) > 0
@@ -593,11 +689,6 @@ class TriageAgent:
                         for concern in safety_review.get("concerns", [])[:3]:
                             result.setdefault("acuity_reasons", []).append(concern)
                         result.setdefault("acuity_sources", []).append("Safety reviewer")
-
-        # ── Override extracted_symptoms with step 1 results ─────────
-        # The synthesis LLM may add vitals interpretations to extracted_symptoms.
-        # Use the actual symptom extraction from step 1 instead.
-        result["extracted_symptoms"] = symptoms
 
         # ── Add structured STG guidelines only for conditions in result ────
         final_conditions = result.get("conditions", [])
@@ -1434,3 +1525,209 @@ class TriageAgent:
             "needs_assessment": True,
             "assessment_questions": [],
         }
+
+    def _build_full_response(
+        self,
+        tool_results: dict,
+        condition_symptoms: dict,
+        assessment_questions: list[dict],
+    ) -> dict:
+        """Build the complete response deterministically from pre-computed data.
+
+        All condition data comes from DB-sourced search results.
+        condition_symptoms come from DB clinical_entities.
+        assessment_questions come from the slim LLM call.
+        """
+        symptoms = tool_results.get("extract_symptoms", {}).get("symptoms", [])
+        safety = tool_results.get("check_safety_flags", {})
+        vitals_acuity = tool_results.get("vitals_acuity", {})
+
+        # Acuity: deterministic from vitals + red flags
+        acuity = vitals_acuity.get("acuity", "routine")
+        acuity_reasons = list(vitals_acuity.get("reasons", []))
+        if safety.get("requires_escalation"):
+            acuity = "urgent"
+        for rf in safety.get("red_flags_triggered", []):
+            reason = f"Red flag: {rf.get('flag', '')} ({rf.get('condition', '')})"
+            if reason not in acuity_reasons:
+                acuity_reasons.append(reason)
+
+        # Conditions: from search results (same logic as _build_fallback_response)
+        search_conditions = tool_results.get("search_conditions", {}).get("conditions", [])
+        top_score = search_conditions[0].get("adjusted_score", 1) if search_conditions else 1
+        conditions = []
+        for s in search_conditions[:5]:
+            code = s.get("stg_code", "")
+            score = s.get("adjusted_score", s.get("raw_score", 0))
+            confidence = round(min(score / max(top_score, 0.01) * 0.90, 0.95), 2)
+
+            # Clean matched features for display
+            raw_feats = s.get("matched_features", [])
+            clean_feats = []
+            for f in raw_feats[:5]:
+                base = f.split(" (")[0] if " (" in f else f
+                if base and base not in clean_feats:
+                    clean_feats.append(base)
+
+            conditions.append({
+                "condition_code": code,
+                "condition_name": s.get("name", ""),
+                "confidence": confidence,
+                "matched_symptoms": clean_feats,
+                "reasoning": "Matched via STG knowledge graph",
+                "source_references": [f"STG {code}"] if code else [],
+            })
+
+        return {
+            "extracted_symptoms": symptoms,
+            "acuity": acuity,
+            "acuity_reasons": acuity_reasons,
+            "acuity_sources": [],
+            "conditions": conditions,
+            "condition_symptoms": condition_symptoms,
+            "needs_assessment": True,
+            "assessment_questions": assessment_questions,
+        }
+
+    def _build_condition_symptoms(
+        self,
+        verified_sorted: list[dict],
+        features_by_condition: dict[int, list[dict]],
+        condition_id_map: dict[str, int],
+        reported_symptoms: set[str],
+    ) -> dict:
+        """Generate condition_symptoms from DB clinical features.
+
+        For each condition (top 5), produce 3-4 verification questions from:
+        1. RED_FLAG features (highest priority — determines urgency)
+        2. diagnostic_feature not already in complaint (distinguishing)
+        3. presenting_feature not already in complaint (confirming)
+        """
+        condition_symptoms: dict[str, list[dict]] = {}
+        reported_lower = {s.lower() for s in reported_symptoms}
+
+        for v in verified_sorted[:5]:
+            code = v["stg_code"]
+            name = v["name"]
+            cid = condition_id_map.get(code)
+            if not cid:
+                continue
+
+            features = features_by_condition.get(cid, [])
+            questions: list[dict] = []
+            seen_names: set[str] = set()
+            q_idx = 0
+
+            for feat in features:
+                feat_name = feat["name"]
+                feat_lower = feat_name.lower()
+
+                # Skip features already reported by the patient
+                if any(feat_lower in r or r in feat_lower for r in reported_lower):
+                    continue
+                # Skip overly short/generic features
+                if len(feat_name) < 4:
+                    continue
+                # Skip duplicates
+                if feat_lower in seen_names:
+                    continue
+                seen_names.add(feat_lower)
+
+                q_idx += 1
+                question_text = self._feature_to_question(
+                    feat_name, feat["relationship_type"]
+                )
+                questions.append({
+                    "id": f"cs_{code.replace('.', '_')}_{q_idx}",
+                    "question": question_text,
+                })
+
+                if len(questions) >= 4:
+                    break
+
+            if questions:
+                condition_symptoms[name] = questions
+
+        return condition_symptoms
+
+    @staticmethod
+    def _feature_to_question(feature_name: str, rel_type: str) -> str:
+        """Convert a clinical feature name into a verification question."""
+        name = feature_name.strip()
+        if name.endswith("?"):
+            return name
+        if rel_type == "RED_FLAG":
+            return f"Does the patient have {name}?"
+        return f"Is there any {name}?"
+
+    async def _generate_assessment_questions(
+        self,
+        complaint: str,
+        patient: dict | None,
+        verified_sorted: list[dict],
+        features_by_condition: dict[int, list[dict]],
+        condition_id_map: dict[str, int],
+    ) -> tuple[list[str], list[dict]]:
+        """Slim LLM call: re-rank conditions and generate assessment questions.
+
+        Returns (ranked_codes, questions) where ranked_codes is the LLM's
+        preferred ordering of condition stg_codes, and questions is the list
+        of discriminating assessment questions.
+        """
+        # Build compact condition summary with distinguishing features
+        lines = []
+        for v in verified_sorted[:5]:
+            code = v["stg_code"]
+            cid = condition_id_map.get(code)
+            feats = features_by_condition.get(cid, []) if cid else []
+            feat_names = [f["name"] for f in feats[:6]]
+            vitals_marker = ""
+            if any("vitals-based" in f for f in v.get("matched_features", [])):
+                vitals_marker = " (vitals-based)"
+            lines.append(f"- {code}: {v['name']}{vitals_marker} (features: {', '.join(feat_names)})")
+
+        prompt = SLIM_ASSESSMENT_PROMPT.format(
+            complaint=complaint,
+            patient=json.dumps(patient) if patient else "none",
+            conditions_summary="\n".join(lines),
+        )
+
+        try:
+            response = await self.client.messages.create(
+                model=self.haiku,
+                max_tokens=1024,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            parsed = self._parse_json_response(text)
+
+            # Extract ranked_codes and questions from response
+            ranked_codes = parsed.get("ranked_codes", [])
+            questions = parsed.get("questions", [])
+            if not isinstance(ranked_codes, list):
+                ranked_codes = []
+            if not isinstance(questions, list):
+                questions = []
+
+            # Scrub citations to only allow verified codes
+            verified_codes = {v["stg_code"] for v in verified_sorted}
+            for q in questions:
+                citation = q.get("source_citation", "")
+                verified_citation = ""
+                for vc in verified_codes:
+                    if vc in citation:
+                        verified_citation = f"STG {vc}"
+                        break
+                q["source_citation"] = verified_citation
+                q["grounding"] = "verified" if verified_citation else "unverified"
+
+            # Only keep ranked_codes that are actually in our verified set
+            ranked_codes = [c for c in ranked_codes if c in verified_codes]
+
+            return ranked_codes, questions
+        except Exception as e:
+            logger.error(f"Assessment question generation failed: {e}")
+            return [], []

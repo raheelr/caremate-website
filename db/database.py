@@ -769,6 +769,42 @@ async def get_condition_prerequisites_batch(
     return result
 
 
+async def get_condition_features_batch(
+    conn: asyncpg.Connection,
+    condition_ids: list[int],
+) -> dict[int, list[dict]]:
+    """Get clinical features for multiple conditions in one query.
+
+    Returns {condition_id: [{name, feature_type, relationship_type}, ...]},
+    sorted by priority: RED_FLAG first, then diagnostic, presenting, associated.
+    """
+    if not condition_ids:
+        return {}
+    rows = await conn.fetch("""
+        SELECT cr.condition_id, e.canonical_name,
+               cr.feature_type, cr.relationship_type
+        FROM clinical_relationships cr
+        JOIN clinical_entities e ON e.id = cr.source_entity_id
+        WHERE cr.condition_id = ANY($1)
+        AND e.entity_type = 'SYMPTOM'
+        ORDER BY cr.condition_id,
+                 CASE cr.relationship_type WHEN 'RED_FLAG' THEN 0 ELSE 1 END,
+                 CASE cr.feature_type
+                     WHEN 'diagnostic_feature' THEN 0
+                     WHEN 'presenting_feature' THEN 1
+                     ELSE 2 END
+    """, condition_ids)
+    result: dict[int, list[dict]] = {}
+    for r in rows:
+        cid = r["condition_id"]
+        result.setdefault(cid, []).append({
+            "name": r["canonical_name"],
+            "feature_type": r["feature_type"],
+            "relationship_type": r["relationship_type"],
+        })
+    return result
+
+
 async def get_condition_by_stg_code(
     conn: asyncpg.Connection,
     stg_code: str,
