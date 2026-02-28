@@ -471,6 +471,18 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
     if not original_symptoms:
         original_symptoms = symptoms
 
+    # Start embedding computation early — overlaps with DB work below.
+    # The Voyage API call takes 2-5s, so launching it before DB queries
+    # lets it run concurrently via run_in_executor.
+    import asyncio
+    embedding_task = None
+    try:
+        from agents.embeddings import get_embedding
+        query_text = " ".join(original_symptoms)
+        embedding_task = asyncio.ensure_future(get_embedding(query_text))
+    except Exception:
+        pass
+
     async with pool.acquire() as conn:
         # Build the original→canonical mapping for grouping
         # This tells us "sore throat" resolved to {"painful red throat", "throat irritation", ...}
@@ -541,12 +553,10 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
         conditions = conditions[:limit]
 
         # Vector search (semantic safety net) — catches conditions where patient
-        # phrasing doesn't match graph edges lexically. Gracefully skips if
-        # embeddings not populated or VOYAGE_API_KEY not set.
+        # phrasing doesn't match graph edges lexically. Uses the embedding
+        # pre-computed at the top of this function (overlaps with DB work).
         try:
-            from agents.embeddings import get_embedding
-            query_text = " ".join(original_symptoms)
-            query_embedding = await get_embedding(query_text)
+            query_embedding = await embedding_task if embedding_task else None
             if query_embedding:
                 vector_results = await vector_search_conditions(
                     conn, query_embedding,
@@ -589,54 +599,107 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
             logger.debug(f"Vector search skipped: {e}")
 
         # Synonym search: patient-language → canonical → condition
+        # BATCHED: 3 queries total instead of O(symptoms × canonicals) individual queries.
         # Uses synonym_rings (fuzzy both directions) + two-hop entity resolution
         # when canonical is a concept (not a condition name).
         synonym_matches = {}  # condition_id -> {row, terms}
-        for orig_term in original_symptoms:
-            term = orig_term.lower().strip()
-            if len(term) < 3:
-                continue
-            syn_rows = await conn.fetch("""
-                SELECT DISTINCT sr.canonical_term
-                FROM synonym_rings sr
-                WHERE sr.synonym ILIKE $1
-                   OR ($2 ILIKE '%' || sr.synonym || '%' AND length(sr.synonym) >= 4)
-            """, f"%{term}%", term)
+        terms_for_syn = [t for t in original_symptoms if len(t.strip()) >= 3]
 
-            for sr in syn_rows:
-                canonical = sr["canonical_term"]
-                # Step 1: Direct condition name match
-                cond_rows = await conn.fetch("""
-                    SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
-                    FROM conditions c WHERE c.name ILIKE $1
-                    AND ($2::text IS NULL
-                         OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
-                         OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-                    LIMIT 5
-                """, f"%{canonical}%", patient_sex)
+        if terms_for_syn:
+            # Query 1: Batch synonym lookup — all symptoms → all canonical terms
+            all_syn_rows = await conn.fetch("""
+                WITH input_terms AS (
+                    SELECT unnest($1::text[]) AS term
+                )
+                SELECT DISTINCT it.term AS input_term, sr.canonical_term
+                FROM input_terms it
+                JOIN synonym_rings sr ON (
+                    sr.synonym ILIKE '%' || it.term || '%'
+                    OR (it.term ILIKE '%' || sr.synonym || '%'
+                        AND length(sr.synonym) >= 4)
+                )
+            """, terms_for_syn)
 
-                # Step 2: Two-hop entity resolution if name match fails
-                if not cond_rows:
-                    cond_rows = await conn.fetch("""
-                        SELECT DISTINCT c.id, c.stg_code, c.name, c.chapter_name,
-                               c.extraction_confidence
-                        FROM clinical_entities ce
+            # Group by input term, cap overly generic terms (e.g. "pain" → 200+ canonicals)
+            MAX_CANONICALS = 30
+            term_to_canonicals = {}
+            for row in all_syn_rows:
+                term_to_canonicals.setdefault(row["input_term"], set()).add(
+                    row["canonical_term"]
+                )
+
+            all_unique_canonicals = set()
+            filtered_term_canonicals = {}
+            for term, canonicals in term_to_canonicals.items():
+                if len(canonicals) > MAX_CANONICALS:
+                    logger.debug(
+                        f"Synonym: '{term}' → {len(canonicals)} canonicals, "
+                        f"skipping (too generic)"
+                    )
+                    continue
+                filtered_term_canonicals[term] = canonicals
+                all_unique_canonicals.update(canonicals)
+
+            if all_unique_canonicals:
+                canonical_list = list(all_unique_canonicals)
+
+                # Query 2: Batch condition name match for ALL canonicals at once
+                name_rows = await conn.fetch("""
+                    WITH cterms AS (
+                        SELECT unnest($1::text[]) AS canonical
+                    )
+                    SELECT DISTINCT ct.canonical, c.id, c.stg_code, c.name,
+                           c.chapter_name, c.extraction_confidence
+                    FROM cterms ct
+                    JOIN conditions c ON c.name ILIKE '%' || ct.canonical || '%'
+                    WHERE ($2::text IS NULL
+                           OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
+                           OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
+                """, canonical_list, patient_sex)
+
+                canonical_to_conds = {}
+                resolved_canonicals = set()
+                for row in name_rows:
+                    c = row["canonical"]
+                    resolved_canonicals.add(c)
+                    canonical_to_conds.setdefault(c, []).append(dict(row))
+
+                # Query 3: Two-hop entity resolution for unresolved canonicals
+                unresolved = [c for c in canonical_list if c not in resolved_canonicals]
+                if unresolved:
+                    twohop_rows = await conn.fetch("""
+                        WITH cterms AS (
+                            SELECT unnest($1::text[]) AS canonical
+                        )
+                        SELECT DISTINCT ct.canonical, c.id, c.stg_code, c.name,
+                               c.chapter_name, c.extraction_confidence
+                        FROM cterms ct
+                        JOIN clinical_entities ce
+                            ON ce.canonical_name ILIKE '%' || ct.canonical || '%'
                         JOIN clinical_relationships cr
-                            ON (cr.source_entity_id = ce.id OR cr.target_entity_id = ce.id)
+                            ON (cr.source_entity_id = ce.id
+                                OR cr.target_entity_id = ce.id)
                         JOIN conditions c ON cr.condition_id = c.id
-                        WHERE ce.canonical_name ILIKE $1
-                        AND cr.feature_type IN ('presenting_feature', 'diagnostic_feature')
+                        WHERE cr.feature_type IN (
+                            'presenting_feature', 'diagnostic_feature'
+                        )
                         AND ($2::text IS NULL
                              OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
                              OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-                        LIMIT 10
-                    """, f"%{canonical}%", patient_sex)
+                    """, unresolved, patient_sex)
 
-                for row in cond_rows:
-                    cid = row["id"]
-                    if cid not in synonym_matches:
-                        synonym_matches[cid] = {"row": dict(row), "terms": set()}
-                    synonym_matches[cid]["terms"].add(orig_term)
+                    for row in twohop_rows:
+                        c = row["canonical"]
+                        canonical_to_conds.setdefault(c, []).append(dict(row))
+
+                # Map resolved conditions back to original symptom terms
+                for term, canonicals in filtered_term_canonicals.items():
+                    for canonical in canonicals:
+                        for cond in canonical_to_conds.get(canonical, []):
+                            cid = cond["id"]
+                            if cid not in synonym_matches:
+                                synonym_matches[cid] = {"row": cond, "terms": set()}
+                            synonym_matches[cid]["terms"].add(term)
 
         # Score and add/boost synonym results
         existing_by_id = {c["id"]: c for c in conditions}
@@ -681,28 +744,28 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
 
         logger.info(f"Synonym search: {len(synonym_matches)} conditions matched")
 
-        # Fallback 1: condition NAME matching — if search terms appear in the
-        # condition name, include/boost it. Aggregates across ALL terms so multi-term
-        # matches score higher (e.g. "vaginal discharge" → "Vaginal Discharge Syndrome").
+        # Fallback 1: condition NAME matching (BATCHED) — single query for all terms.
         existing_ids = {c["id"] for c in conditions}
         name_matches = {}  # condition_id -> {row, terms}
-        for orig_term in original_symptoms:
-            if len(orig_term) < 4:
-                continue
-            name_rows = await conn.fetch("""
-                SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
-                FROM conditions c
-                WHERE c.name ILIKE $1
-                AND ($2::text IS NULL
+        terms_for_name = [t for t in original_symptoms if len(t) >= 4]
+        if terms_for_name:
+            all_name_rows = await conn.fetch("""
+                WITH input_terms AS (
+                    SELECT unnest($1::text[]) AS term
+                )
+                SELECT DISTINCT it.term, c.id, c.stg_code, c.name,
+                       c.chapter_name, c.extraction_confidence
+                FROM input_terms it
+                JOIN conditions c ON c.name ILIKE '%' || it.term || '%'
+                WHERE ($2::text IS NULL
                      OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
                      OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-                LIMIT 5
-            """, f"%{orig_term}%", patient_sex)
-            for row in name_rows:
+            """, terms_for_name, patient_sex)
+            for row in all_name_rows:
                 cid = row["id"]
                 if cid not in name_matches:
                     name_matches[cid] = {"row": dict(row), "terms": set()}
-                name_matches[cid]["terms"].add(orig_term)
+                name_matches[cid]["terms"].add(row["term"])
 
         existing_by_id = {c["id"]: c for c in conditions}
         for cid, data in sorted(
@@ -741,35 +804,29 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                 })
                 existing_ids.add(row["id"])
 
-        # Fallback 2: Multi-term knowledge_chunks search
-        # Searches STG text chunks for EACH symptom, then aggregates — conditions
-        # matching multiple distinct symptoms get proportionally higher scores.
-        # This catches conditions where the STG text describes the symptoms
-        # even though the knowledge graph lacks edges.
+        # Fallback 2: Multi-term knowledge_chunks search (BATCHED)
+        # Single query for all symptoms, then aggregate in Python.
         chunk_matches = {}  # condition_id -> {row, terms, best_section}
-        for orig_term in original_symptoms:
-            if len(orig_term) < 3:
-                continue
-            chunk_rows = await conn.fetch("""
-                SELECT DISTINCT ON (c.id) c.id, c.stg_code, c.name, c.chapter_name,
+        terms_for_chunk = [t for t in original_symptoms if len(t) >= 3]
+        if terms_for_chunk:
+            all_chunk_rows = await conn.fetch("""
+                WITH input_terms AS (
+                    SELECT unnest($1::text[]) AS term
+                )
+                SELECT it.term, c.id, c.stg_code, c.name, c.chapter_name,
                        c.extraction_confidence, kc.section_role
-                FROM knowledge_chunks kc
+                FROM input_terms it
+                JOIN knowledge_chunks kc ON kc.chunk_text ILIKE '%' || it.term || '%'
                 JOIN conditions c ON c.id = kc.condition_id
-                WHERE kc.chunk_text ILIKE $1
-                AND ($2::text IS NULL
+                WHERE ($2::text IS NULL
                      OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
                      OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-                ORDER BY c.id,
-                    CASE kc.section_role
-                        WHEN 'CLINICAL_PRESENTATION' THEN 1
-                        WHEN 'DANGER_SIGNS' THEN 2
-                        WHEN 'MANAGEMENT' THEN 3
-                        WHEN 'DOSING_TABLE' THEN 4
-                        ELSE 5
-                    END
-                LIMIT 15
-            """, f"%{orig_term}%", patient_sex)
-            for row in chunk_rows:
+            """, terms_for_chunk, patient_sex)
+            section_priority = {
+                "CLINICAL_PRESENTATION": 1, "DANGER_SIGNS": 2,
+                "MANAGEMENT": 3, "DOSING_TABLE": 4,
+            }
+            for row in all_chunk_rows:
                 cid = row["id"]
                 if cid not in chunk_matches:
                     chunk_matches[cid] = {
@@ -777,12 +834,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                         "terms": set(),
                         "best_section": row["section_role"],
                     }
-                chunk_matches[cid]["terms"].add(orig_term)
-                # Track the best (most relevant) section across all term matches
-                section_priority = {
-                    "CLINICAL_PRESENTATION": 1, "DANGER_SIGNS": 2,
-                    "MANAGEMENT": 3, "DOSING_TABLE": 4,
-                }
+                chunk_matches[cid]["terms"].add(row["term"])
                 current_priority = section_priority.get(chunk_matches[cid]["best_section"], 5)
                 new_priority = section_priority.get(row["section_role"], 5)
                 if new_priority < current_priority:
@@ -838,28 +890,27 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                 })
                 existing_ids.add(row["id"])
 
-        # Fallback 3: Search conditions.description_text for multi-symptom matches.
-        # ALWAYS runs — can both ADD new conditions and BOOST existing low-scored
-        # conditions when their STG description mentions the patient's symptoms.
-        # This fixes cases where the knowledge graph lacks edges but the STG text
-        # clearly describes the symptoms (e.g., Malaria: "fever, chills, rigors").
+        # Fallback 3: Search conditions.description_text (BATCHED)
         desc_matches = {}  # condition_id -> {row, terms}
-        search_terms = [t for t in original_symptoms if len(t) >= 4]
-        for term in search_terms:
-            desc_rows = await conn.fetch("""
-                SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
-                FROM conditions c
-                WHERE c.description_text ILIKE $1
-                AND ($2::text IS NULL
+        terms_for_desc = [t for t in original_symptoms if len(t) >= 4]
+        if terms_for_desc:
+            all_desc_rows = await conn.fetch("""
+                WITH input_terms AS (
+                    SELECT unnest($1::text[]) AS term
+                )
+                SELECT it.term, c.id, c.stg_code, c.name, c.chapter_name,
+                       c.extraction_confidence
+                FROM input_terms it
+                JOIN conditions c ON c.description_text ILIKE '%' || it.term || '%'
+                WHERE ($2::text IS NULL
                      OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
                      OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-                LIMIT 20
-            """, f"%{term}%", patient_sex)
-            for row in desc_rows:
+            """, terms_for_desc, patient_sex)
+            for row in all_desc_rows:
                 cid = row["id"]
                 if cid not in desc_matches:
                     desc_matches[cid] = {"row": dict(row), "terms": set()}
-                desc_matches[cid]["terms"].add(term)
+                desc_matches[cid]["terms"].add(row["term"])
 
         # Boost existing or add new conditions where 2+ symptoms match
         existing_by_id = {c["id"]: c for c in conditions}

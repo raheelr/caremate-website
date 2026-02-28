@@ -38,12 +38,18 @@ def _get_client():
 
 
 async def get_embedding(text: str) -> Optional[list[float]]:
-    """Embed a single text. Returns None if Voyage AI unavailable."""
+    """Embed a single text. Returns None if Voyage AI unavailable.
+    Runs the blocking API call in a thread executor so it doesn't block
+    the event loop and can overlap with concurrent DB queries."""
+    import asyncio
     client = _get_client()
     if not client:
         return None
     try:
-        result = client.embed([text], model=MODEL, input_type="query")
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: client.embed([text], model=MODEL, input_type="query")
+        )
         return result.embeddings[0]
     except Exception as e:
         logger.warning(f"Voyage AI embedding failed: {e}")
