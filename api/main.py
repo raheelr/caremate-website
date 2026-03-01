@@ -11,6 +11,14 @@ Endpoints:
   POST /api/prescribing/suggest-dosing — medicine dosing suggestions
   GET  /api/health               — health check
 
+  Phase II Clinician Survey:
+  GET  /api/vignettes                       — list all vignettes
+  POST /api/vignettes                       — create a vignette
+  GET  /api/vignettes/:id                   — get single vignette (strips expected answers)
+  POST /api/vignettes/:id/respond           — submit clinician/CareMate response
+  GET  /api/vignettes/:id/results           — compare clinician vs CareMate
+  POST /api/vignettes/:id/run-caremate      — auto-run CareMate on vignette
+
 Run:
   cd ~/Downloads/caremate-backend-v2
   source venv/bin/activate
@@ -40,10 +48,16 @@ from api.models import (
     EnrichRequest,
     RAGQueryRequest,
     DosingRequest,
+    CreateVignetteRequest,
+    SubmitResponseRequest,
 )
 from agents.triage_agent import TriageAgent
 from safety.checker import SafetyChecker
-from db.database import get_condition_detail, get_condition_by_stg_code, search_knowledge_chunks
+from db.database import (
+    get_condition_detail, get_condition_by_stg_code, search_knowledge_chunks,
+    create_vignette, list_vignettes, get_vignette, save_vignette_response,
+    get_vignette_responses, get_vignette_comparison,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("caremate.api")
@@ -387,4 +401,186 @@ async def suggest_dosing(request: DosingRequest):
 
     except Exception as e:
         logger.error(f"Dosing suggestion failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Phase II Clinician Survey Endpoints ────────────────────────────────────
+
+@app.get("/api/vignettes")
+async def list_all_vignettes(active_only: bool = True):
+    """List all clinical vignettes (for survey selection)."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            vignettes = await list_vignettes(conn, active_only=active_only)
+        # Parse JSONB strings back to dicts for response
+        for v in vignettes:
+            if isinstance(v.get("vitals"), str):
+                v["vitals"] = json.loads(v["vitals"])
+            if isinstance(v.get("core_history"), str):
+                v["core_history"] = json.loads(v["core_history"])
+        return {"vignettes": vignettes, "count": len(vignettes)}
+    except Exception as e:
+        logger.error(f"List vignettes failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vignettes")
+async def create_new_vignette(request: CreateVignetteRequest):
+    """Create a new clinical vignette (admin/Tasleem)."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            vignette = await create_vignette(conn, request.model_dump())
+        return {"vignette": vignette, "message": "Vignette created"}
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail=f"Vignette code '{request.vignette_code}' already exists")
+    except Exception as e:
+        logger.error(f"Create vignette failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vignettes/{vignette_id}")
+async def get_single_vignette(vignette_id: int):
+    """Get a single vignette by ID (for clinician to fill in)."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            vignette = await get_vignette(conn, vignette_id)
+        if not vignette:
+            raise HTTPException(status_code=404, detail="Vignette not found")
+        # Parse JSONB and strip expected answers (clinicians shouldn't see them)
+        if isinstance(vignette.get("vitals"), str):
+            vignette["vitals"] = json.loads(vignette["vitals"])
+        if isinstance(vignette.get("core_history"), str):
+            vignette["core_history"] = json.loads(vignette["core_history"])
+        vignette.pop("expected_conditions", None)
+        vignette.pop("expected_acuity", None)
+        vignette.pop("expected_sats_colour", None)
+        return vignette
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get vignette failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vignettes/{vignette_id}/respond")
+async def submit_vignette_response(vignette_id: int, request: SubmitResponseRequest):
+    """Submit a clinician or CareMate response to a vignette."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            # Verify vignette exists
+            vignette = await get_vignette(conn, vignette_id)
+            if not vignette:
+                raise HTTPException(status_code=404, detail="Vignette not found")
+
+            # Serialize nested models to dicts for JSON storage
+            data = request.model_dump()
+            data["differential_diagnosis"] = [d.model_dump() if hasattr(d, 'model_dump') else d for d in request.differential_diagnosis]
+            data["investigations"] = [i.model_dump() if hasattr(i, 'model_dump') else i for i in request.investigations]
+            data["treatment_plan"] = [t.model_dump() if hasattr(t, 'model_dump') else t for t in request.treatment_plan]
+
+            response = await save_vignette_response(conn, vignette_id, data)
+        return {"response": response, "message": "Response recorded"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Submit response failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/vignettes/{vignette_id}/results")
+async def get_vignette_results(vignette_id: int):
+    """Get comparison of clinician vs CareMate responses for a vignette."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            comparison = await get_vignette_comparison(conn, vignette_id)
+        if not comparison:
+            raise HTTPException(status_code=404, detail="Vignette not found")
+
+        # Parse JSONB strings in vignette
+        v = comparison["vignette"]
+        for field in ("vitals", "core_history", "expected_conditions"):
+            if isinstance(v.get(field), str):
+                v[field] = json.loads(v[field])
+
+        # Parse JSONB strings in responses
+        for resp in comparison["clinician_responses"] + comparison["caremate_responses"]:
+            for field in ("differential_diagnosis", "investigations", "treatment_plan", "red_flags_identified"):
+                if isinstance(resp.get(field), str):
+                    resp[field] = json.loads(resp[field])
+
+        return comparison
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get vignette results failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vignettes/{vignette_id}/run-caremate")
+async def run_caremate_on_vignette(vignette_id: int):
+    """Run CareMate's triage agent on a vignette and save the result as a response."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            vignette = await get_vignette(conn, vignette_id)
+        if not vignette:
+            raise HTTPException(status_code=404, detail="Vignette not found")
+
+        # Parse vignette fields
+        vitals_raw = vignette.get("vitals")
+        if isinstance(vitals_raw, str):
+            vitals_raw = json.loads(vitals_raw)
+        history_raw = vignette.get("core_history")
+        if isinstance(history_raw, str):
+            history_raw = json.loads(history_raw)
+
+        patient = {}
+        if vignette.get("patient_age"):
+            patient["age"] = vignette["patient_age"]
+        if vignette.get("patient_sex"):
+            patient["sex"] = vignette["patient_sex"]
+        if vignette.get("pregnancy_status"):
+            patient["pregnancy_status"] = vignette["pregnancy_status"]
+
+        # Run triage agent
+        result = await app.state.agent.analyze(
+            complaint=vignette["complaint"],
+            patient=patient or None,
+            vitals=vitals_raw or None,
+            core_history=history_raw or None,
+        )
+
+        # Convert CareMate output to vignette response format
+        differential = []
+        for i, cond in enumerate(result.get("conditions", [])):
+            differential.append({
+                "rank": i + 1,
+                "condition_name": cond.get("condition_name", ""),
+                "condition_code": cond.get("condition_code", ""),
+                "confidence": cond.get("confidence", 0),
+                "reasoning": cond.get("reasoning", ""),
+            })
+
+        response_data = {
+            "respondent_type": "caremate",
+            "respondent_name": "caremate_v1.3",
+            "differential_diagnosis": differential,
+            "triage_level": result.get("acuity"),
+            "sats_colour": result.get("sats_colour"),
+            "red_flags_identified": result.get("acuity_reasons", []),
+            "notes": f"Extracted symptoms: {', '.join(result.get('extracted_symptoms', []))}",
+        }
+
+        async with app.state.pool.acquire() as conn:
+            saved = await save_vignette_response(conn, vignette_id, response_data)
+
+        return {
+            "response": saved,
+            "caremate_raw": result,
+            "message": "CareMate assessment saved",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Run CareMate on vignette failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

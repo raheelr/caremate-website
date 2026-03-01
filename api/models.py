@@ -148,3 +148,76 @@ class DosingRequest(BaseModel):
 
 class DosingResponse(BaseModel):
     suggestion: str
+
+
+# ── Phase II Clinician Survey ─────────────────────────────────────────────────
+
+class VignetteDiagnosis(BaseModel):
+    rank: int
+    condition_name: str
+    condition_code: Optional[str] = None
+    confidence: Optional[float] = None
+    reasoning: Optional[str] = None
+
+
+class VignetteInvestigation(BaseModel):
+    name: str
+    urgency: Optional[str] = None           # "stat" | "routine" | "urgent"
+    reasoning: Optional[str] = None
+
+
+class VignetteTreatment(BaseModel):
+    medication: str
+    dose: Optional[str] = None
+    duration: Optional[str] = None
+    reasoning: Optional[str] = None
+
+
+class CreateVignetteRequest(BaseModel):
+    vignette_code: str
+    title: str
+    domain: Optional[str] = None
+    complaint: str
+    patient_age: Optional[int] = None
+    patient_sex: Optional[str] = None
+    pregnancy_status: Optional[str] = None
+    vitals: Optional[dict] = None
+    core_history: Optional[dict] = None
+    additional_info: Optional[str] = None
+    expected_conditions: Optional[list[dict]] = None
+    expected_acuity: Optional[str] = None
+    expected_sats_colour: Optional[str] = None
+    difficulty: str = "medium"
+    created_by: Optional[str] = None
+
+
+class VignetteResponse(BaseModel):
+    id: int
+    vignette_code: str
+    title: str
+    domain: Optional[str] = None
+    complaint: str
+    patient_age: Optional[int] = None
+    patient_sex: Optional[str] = None
+    pregnancy_status: Optional[str] = None
+    vitals: Optional[dict] = None
+    core_history: Optional[dict] = None
+    additional_info: Optional[str] = None
+    difficulty: str = "medium"
+    response_count: int = 0
+
+
+class SubmitResponseRequest(BaseModel):
+    respondent_type: str                    # "clinician" | "caremate"
+    respondent_name: Optional[str] = None
+    respondent_credentials: Optional[str] = None
+    differential_diagnosis: list[VignetteDiagnosis] = []
+    triage_level: Optional[str] = None
+    sats_colour: Optional[str] = None
+    investigations: list[VignetteInvestigation] = []
+    treatment_plan: list[VignetteTreatment] = []
+    referral_decision: Optional[str] = None  # "refer" | "manage" | "conditional"
+    referral_reason: Optional[str] = None
+    red_flags_identified: list[str] = []
+    notes: Optional[str] = None
+    time_taken_seconds: Optional[int] = None

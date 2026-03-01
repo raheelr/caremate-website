@@ -910,6 +910,121 @@ async def vector_search_conditions(
     return sorted(seen.values(), key=lambda x: x["similarity"], reverse=True)
 
 
+# ── Vignette CRUD (Phase II Survey) ─────────────────────────────────────────
+
+async def create_vignette(conn: asyncpg.Connection, data: dict) -> dict:
+    """Create a new clinical vignette. Returns the created vignette."""
+    row = await conn.fetchrow("""
+        INSERT INTO clinical_vignettes (
+            vignette_code, title, domain, complaint,
+            patient_age, patient_sex, pregnancy_status,
+            vitals, core_history, additional_info,
+            expected_conditions, expected_acuity, expected_sats_colour,
+            difficulty, created_by
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        RETURNING *
+    """,
+        data["vignette_code"], data["title"], data.get("domain"),
+        data["complaint"], data.get("patient_age"), data.get("patient_sex"),
+        data.get("pregnancy_status"),
+        json.dumps(data.get("vitals") or {}),
+        json.dumps(data.get("core_history") or {}),
+        data.get("additional_info"),
+        json.dumps(data.get("expected_conditions") or []),
+        data.get("expected_acuity"), data.get("expected_sats_colour"),
+        data.get("difficulty", "medium"), data.get("created_by"),
+    )
+    return dict(row)
+
+
+async def list_vignettes(conn: asyncpg.Connection, active_only: bool = True) -> list[dict]:
+    """List all vignettes with response counts."""
+    where = "WHERE v.active = TRUE" if active_only else ""
+    rows = await conn.fetch(f"""
+        SELECT v.id, v.vignette_code, v.title, v.domain, v.complaint,
+               v.patient_age, v.patient_sex, v.pregnancy_status,
+               v.vitals, v.core_history, v.additional_info, v.difficulty,
+               COUNT(vr.id) as response_count
+        FROM clinical_vignettes v
+        LEFT JOIN vignette_responses vr ON vr.vignette_id = v.id
+        {where}
+        GROUP BY v.id
+        ORDER BY v.vignette_code
+    """)
+    return [dict(r) for r in rows]
+
+
+async def get_vignette(conn: asyncpg.Connection, vignette_id: int) -> Optional[dict]:
+    """Get a single vignette by ID."""
+    row = await conn.fetchrow(
+        "SELECT * FROM clinical_vignettes WHERE id = $1", vignette_id
+    )
+    return dict(row) if row else None
+
+
+async def get_vignette_by_code(conn: asyncpg.Connection, code: str) -> Optional[dict]:
+    """Get a single vignette by its code (e.g. 'PII-001')."""
+    row = await conn.fetchrow(
+        "SELECT * FROM clinical_vignettes WHERE vignette_code = $1", code
+    )
+    return dict(row) if row else None
+
+
+async def save_vignette_response(conn: asyncpg.Connection, vignette_id: int, data: dict) -> dict:
+    """Save a clinician or CareMate response to a vignette."""
+    row = await conn.fetchrow("""
+        INSERT INTO vignette_responses (
+            vignette_id, respondent_type, respondent_name, respondent_credentials,
+            differential_diagnosis, triage_level, sats_colour,
+            investigations, treatment_plan,
+            referral_decision, referral_reason,
+            red_flags_identified, notes, time_taken_seconds
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        RETURNING *
+    """,
+        vignette_id,
+        data["respondent_type"], data.get("respondent_name"),
+        data.get("respondent_credentials"),
+        json.dumps(data.get("differential_diagnosis", [])),
+        data.get("triage_level"), data.get("sats_colour"),
+        json.dumps(data.get("investigations", [])),
+        json.dumps(data.get("treatment_plan", [])),
+        data.get("referral_decision"), data.get("referral_reason"),
+        json.dumps(data.get("red_flags_identified", [])),
+        data.get("notes"), data.get("time_taken_seconds"),
+    )
+    return dict(row)
+
+
+async def get_vignette_responses(conn: asyncpg.Connection, vignette_id: int) -> list[dict]:
+    """Get all responses for a vignette."""
+    rows = await conn.fetch("""
+        SELECT * FROM vignette_responses
+        WHERE vignette_id = $1
+        ORDER BY respondent_type, created_at
+    """, vignette_id)
+    return [dict(r) for r in rows]
+
+
+async def get_vignette_comparison(conn: asyncpg.Connection, vignette_id: int) -> dict:
+    """Get vignette with all responses grouped by type, plus expected answers."""
+    vignette = await get_vignette(conn, vignette_id)
+    if not vignette:
+        return None
+    responses = await get_vignette_responses(conn, vignette_id)
+
+    clinician_responses = [r for r in responses if r["respondent_type"] == "clinician"]
+    caremate_responses = [r for r in responses if r["respondent_type"] == "caremate"]
+
+    return {
+        "vignette": vignette,
+        "clinician_responses": clinician_responses,
+        "caremate_responses": caremate_responses,
+        "total_clinicians": len(clinician_responses),
+        "total_caremate": len(caremate_responses),
+    }
+
+
 async def search_knowledge_chunks(
     conn: asyncpg.Connection,
     query: str,

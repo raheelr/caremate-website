@@ -52,6 +52,14 @@ POST /api/triage/enrich      ← condition treatment details
 POST /api/rag/query          ← RAG-based clinical question answering
 POST /api/prescribing/suggest-dosing  ← medication dosing
 GET  /api/health             ← health check (public, no API key)
+
+Phase II Clinician Survey:
+GET  /api/vignettes                  ← list all vignettes
+POST /api/vignettes                  ← create a vignette (admin)
+GET  /api/vignettes/:id              ← get vignette (strips expected answers)
+POST /api/vignettes/:id/respond      ← submit clinician/CareMate response
+GET  /api/vignettes/:id/results      ← compare clinician vs CareMate
+POST /api/vignettes/:id/run-caremate ← auto-run CareMate on a vignette
 ```
 - API Key header: `X-API-Key`
 
@@ -92,9 +100,9 @@ cd ~/Downloads/caremate-backend-v2 && source venv/bin/activate
 - **Phase III**: Feasibility testing in real nurse clinics (focus on nurse clinics, not GPs). Numaan managing clinic access via Tutuk.
 
 ### Tier 1 — Immediate / Required for Validation
-1. **SATS integration** — Ingest `SATS-Manual-A5-LR-spreads.pdf` (SA Triage Scale training manual, shared by Tasleem). Extract colour-coded acuity rules (Red/Orange/Yellow/Green) and discriminator lists. Replaces/augments current hard-coded vitals thresholds with nationally standardised system. Every SA emergency department uses this. **Status: NOT STARTED** — PDF in project root, no code written.
-2. **Phase II clinician survey form** — Structured form where clinicians receive a vignette and record: differential diagnosis, triage level, recommended investigations, treatment plan, referral decision. Needs to be built before Phase II begins. **Status: FRONTEND SCAFFOLD ONLY** — `ValidationDashboard.tsx` exists with Phase I/II/III tabs. `clinical_vignettes` + `vignette_results` tables exist in Supabase. No backend endpoints for survey submission.
-3. **Regional/local prevalence tuning** — Probability ranking must account for local epidemiology (Western Cape vs KZN vs Limpopo — TB rates, HIV prevalence, malaria zones differ dramatically). Currently have SA-wide prevalence tiers (23 conditions with 1.15x-1.25x boost). **Status: ~80% DONE IN WORKTREE** — `wizardly-solomon` worktree has `agents/scoring_config.py` with centralized prevalence config. NOT merged to main.
+1. **SATS integration** — DONE (commit 341a589). `agents/sats.py` implements TEWS vital sign scoring (adult + child tables) + clinical discriminator checking. Replaces hard-coded vitals thresholds with nationally standardised SATS colour system (Red/Orange/Yellow/Green). Backward-compatible `acuity` field preserved.
+2. **Phase II clinician survey form** — BACKEND DONE. DB tables `clinical_vignettes` + `vignette_responses` created. 6 API endpoints: list/create/get vignettes, submit responses, compare results, auto-run CareMate. 3 seed vignettes loaded. **Awaiting**: frontend survey form + Tasleem's vignettes.
+3. **Regional/local prevalence tuning** — SCORING CONFIG MERGED. `agents/scoring_config.py` centralises all feature weights, prevalence tiers, non-disease penalties. SA-wide prevalence tiers active (28 conditions). **Remaining**: per-province granularity (Western Cape vs KZN vs Limpopo) not yet implemented.
 
 ### Tier 2 — High Value, Near-Term
 4. **Investigation recommendations as structured output** — Labs/imaging from STG as discrete fields, not buried in text chunks
