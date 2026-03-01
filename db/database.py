@@ -628,8 +628,42 @@ async def get_condition_detail(
         FROM conditions c
         WHERE c.id = $1
     """, condition_id)
-    
+
     return dict(row) if row else None
+
+
+async def get_condition_details_batch(
+    conn: asyncpg.Connection,
+    condition_ids: list[int],
+) -> dict[int, dict]:
+    """Batch fetch full STG details for multiple conditions in one query."""
+    if not condition_ids:
+        return {}
+    rows = await conn.fetch("""
+        SELECT c.*,
+            COALESCE(
+                (SELECT json_agg(json_build_object(
+                    'name', m.name,
+                    'route', m.routes[1],
+                    'dose_context', cm.dose_context,
+                    'treatment_line', cm.treatment_line,
+                    'age_group', cm.age_group,
+                    'special_notes', cm.special_notes,
+                    'paediatric_dose_mg_per_kg', m.paediatric_dose_mg_per_kg,
+                    'paediatric_frequency', m.paediatric_frequency,
+                    'paediatric_note', m.paediatric_note,
+                    'pregnancy_safe', m.pregnancy_safe,
+                    'pregnancy_notes', m.pregnancy_notes
+                ))
+                FROM condition_medicines cm
+                JOIN medicines m ON m.id = cm.medicine_id
+                WHERE cm.condition_id = c.id
+                ), '[]'::json
+            ) as medicines_json
+        FROM conditions c
+        WHERE c.id = ANY($1::int[])
+    """, condition_ids)
+    return {row["id"]: dict(row) for row in rows}
 
 
 async def resolve_to_canonical(

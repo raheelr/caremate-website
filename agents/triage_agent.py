@@ -23,7 +23,7 @@ from typing import Optional
 
 from agents.tools import TOOL_HANDLERS
 from agents.sats import compute_sats_acuity
-from db.database import get_condition_rich_content, get_condition_features_batch
+from db.database import get_condition_rich_content, get_condition_features_batch, get_condition_details_batch
 
 logger = logging.getLogger(__name__)
 
@@ -517,9 +517,15 @@ class TriageAgent:
         # Update tool_results so _extract_verified_conditions sees the injected conditions
         tool_results["search_conditions"]["conditions"] = conditions
 
-        # 2c. Parallel: safety flags + condition details + vitals acuity
+        # 2c. Parallel: safety flags + condition details + features + acuity
         condition_ids = [c["id"] for c in conditions[:15]]
         top_ids = [c["id"] for c in conditions[:10]]
+
+        # Build condition_id map now (needed for features query)
+        condition_id_map: dict[str, int] = {}
+        for c in conditions:
+            if c.get("stg_code") and c.get("id"):
+                condition_id_map[c["stg_code"]] = c["id"]
 
         async def _get_safety():
             if not condition_ids:
@@ -528,15 +534,47 @@ class TriageAgent:
                 {"symptoms": expanded_terms, "condition_ids": condition_ids,
                  "vitals": vitals or {}}, self.pool)
 
-        async def _get_details():
+        async def _get_details_batch():
+            async with self.pool.acquire() as conn:
+                raw = await get_condition_details_batch(conn, top_ids)
+            # Convert to the format expected by the rest of the code
+            import json as _json
             details = {}
-            for cid in top_ids:
-                d = await TOOL_HANDLERS["get_condition_detail"](
-                    {"condition_id": cid}, self.pool)
-                details[cid] = d
+            for cid, row in raw.items():
+                meds = row.get("medicines_json", [])
+                if isinstance(meds, str):
+                    meds = _json.loads(meds)
+                referral = row.get("referral_criteria", "[]")
+                if isinstance(referral, str):
+                    try:
+                        referral = _json.loads(referral)
+                    except (ValueError, TypeError):
+                        referral = [referral] if referral else []
+                details[cid] = {
+                    "condition_id": row["id"],
+                    "stg_code": row["stg_code"],
+                    "name": row["name"],
+                    "chapter": row.get("chapter_name", ""),
+                    "description": row.get("description_text", ""),
+                    "general_measures": row.get("general_measures", ""),
+                    "medicine_treatment": row.get("medicine_treatment", ""),
+                    "danger_signs": row.get("danger_signs", ""),
+                    "referral_criteria": referral,
+                    "medicines": meds,
+                    "source_pages": row.get("source_pages", []),
+                }
             return details
 
-        safety_result, details = await asyncio.gather(_get_safety(), _get_details())
+        async def _get_features():
+            # Use top 5 from search results (don't need verified_sorted)
+            top5_ids = [c["id"] for c in conditions[:5]]
+            async with self.pool.acquire() as conn:
+                return await get_condition_features_batch(conn, top5_ids)
+
+        # Run ALL three DB queries in parallel
+        safety_result, details, features_by_condition = await asyncio.gather(
+            _get_safety(), _get_details_batch(), _get_features()
+        )
         tool_results["check_safety_flags"] = safety_result
         tool_results["condition_details"] = details
         patient_age = patient.get("age") if patient else None
@@ -547,7 +585,7 @@ class TriageAgent:
         tool_results["vitals_acuity"] = acuity_info
         sats_colour = acuity_info.get("sats_colour", "green")
         tews_score = acuity_info.get("tews_score", 0)
-        logger.info(f"[{time.monotonic()-t0:.1f}s] Safety + details done | SATS: {sats_colour} (TEWS {tews_score})")
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Safety + details + features done | SATS: {sats_colour} (TEWS {tews_score})")
 
         # ── Step 3: Build response (mostly deterministic) ────────────────
         # Strategy: launch LLM calls ASAP, then do deterministic work while they run.
@@ -563,21 +601,6 @@ class TriageAgent:
                 if i > 0:
                     verified_sorted.insert(0, verified_sorted.pop(i))
                 break
-
-        # Build condition_id map for DB lookups
-        condition_id_map: dict[str, int] = {}
-        for c in conditions:
-            if c.get("stg_code") and c.get("id"):
-                condition_id_map[c["stg_code"]] = c["id"]
-
-        # Fetch clinical features FIRST (needed by assessment prompt)
-        top_cids = [
-            condition_id_map[v["stg_code"]]
-            for v in verified_sorted[:5]
-            if v["stg_code"] in condition_id_map
-        ]
-        async with self.pool.acquire() as conn:
-            features_by_condition = await get_condition_features_batch(conn, top_cids)
 
         # Fast-path check (expanded threshold: 1.5x instead of 2.5x)
         top_score = verified_sorted[0].get("score", 0) if verified_sorted else 0
