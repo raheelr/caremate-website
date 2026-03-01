@@ -22,6 +22,7 @@ import asyncpg
 from typing import Optional
 
 from agents.tools import TOOL_HANDLERS
+from agents.sats import compute_sats_acuity
 from db.database import get_condition_rich_content, get_condition_features_batch
 
 logger = logging.getLogger(__name__)
@@ -543,9 +544,15 @@ class TriageAgent:
         safety_result, details = await asyncio.gather(_get_safety(), _get_details())
         tool_results["check_safety_flags"] = safety_result
         tool_results["condition_details"] = details
-        acuity_info = self._compute_vitals_acuity(vitals or {})
+        patient_age = patient.get("age") if patient else None
+        acuity_info = self._compute_vitals_acuity(
+            vitals or {}, complaint=complaint, symptoms=symptoms,
+            patient_age=patient_age,
+        )
         tool_results["vitals_acuity"] = acuity_info
-        logger.info(f"[{time.monotonic()-t0:.1f}s] Safety + details done (parallel)")
+        sats_colour = acuity_info.get("sats_colour", "green")
+        tews_score = acuity_info.get("tews_score", 0)
+        logger.info(f"[{time.monotonic()-t0:.1f}s] Safety + details done | SATS: {sats_colour} (TEWS {tews_score})")
 
         # ── Step 3: Build response (mostly deterministic) ────────────────
         # Pre-compute condition_symptoms from DB, then run slim LLM call
@@ -1011,28 +1018,26 @@ class TriageAgent:
             return {"safe": True}
 
     @staticmethod
-    def _compute_vitals_acuity(vitals: dict) -> dict:
-        """Compute acuity from vitals thresholds — no LLM needed."""
-        acuity = "routine"
-        reasons = []
-        if vitals.get("systolic") and vitals["systolic"] >= 180:
-            acuity = "urgent"
-            reasons.append(f"Severe hypertension: BP {vitals['systolic']}/{vitals.get('diastolic', '?')}")
-        if vitals.get("oxygenSat") and vitals["oxygenSat"] < 92:
-            acuity = "urgent"
-            reasons.append(f"Low SpO2: {vitals['oxygenSat']}%")
-        if vitals.get("temperature") and vitals["temperature"] >= 39.0:
-            if acuity != "urgent":
-                acuity = "priority"
-            reasons.append(f"High fever: {vitals['temperature']}°C")
-        if vitals.get("heartRate") and (vitals["heartRate"] > 120 or vitals["heartRate"] < 50):
-            if acuity != "urgent":
-                acuity = "priority"
-            reasons.append(f"Abnormal heart rate: {vitals['heartRate']} bpm")
-        if vitals.get("respiratoryRate") and vitals["respiratoryRate"] >= 30:
-            acuity = "urgent"
-            reasons.append(f"Tachypnoea: {vitals['respiratoryRate']}/min")
-        return {"acuity": acuity, "reasons": reasons}
+    def _compute_vitals_acuity(
+        vitals: dict,
+        complaint: str = "",
+        symptoms: list[str] | None = None,
+        patient_age: int | None = None,
+    ) -> dict:
+        """Compute acuity using the South African Triage Scale (SATS).
+
+        Uses TEWS (Triage Early Warning Score) vital sign scoring plus
+        clinical discriminators from the SATS training manual.
+
+        Returns dict with: acuity, sats_colour, sats_priority, tews_score,
+        reasons, target_minutes — backward compatible with old 3-tier system.
+        """
+        return compute_sats_acuity(
+            vitals=vitals,
+            complaint=complaint,
+            symptoms=symptoms,
+            patient_age=patient_age,
+        )
 
     async def _inject_vitals_conditions(self, conditions: list, vitals: dict) -> list:
         """
@@ -1515,16 +1520,23 @@ class TriageAgent:
         if safety.get("requires_escalation"):
             acuity = "urgent"
 
-        return {
+        result = {
             "extracted_symptoms": symptoms,
             "acuity": acuity,
             "acuity_reasons": vitals_acuity.get("reasons", []),
-            "acuity_sources": [],
+            "acuity_sources": ["SATS (South African Triage Scale)"],
             "conditions": conditions,
             "condition_symptoms": {},
             "needs_assessment": True,
             "assessment_questions": [],
         }
+        sats_colour = vitals_acuity.get("sats_colour")
+        if sats_colour:
+            result["sats_colour"] = sats_colour
+            result["sats_priority"] = vitals_acuity.get("sats_priority", "")
+            result["tews_score"] = vitals_acuity.get("tews_score", 0)
+            result["sats_target_minutes"] = vitals_acuity.get("target_minutes", 240)
+        return result
 
     def _build_full_response(
         self,
@@ -1578,16 +1590,26 @@ class TriageAgent:
                 "source_references": [f"STG {code}"] if code else [],
             })
 
-        return {
+        result = {
             "extracted_symptoms": symptoms,
             "acuity": acuity,
             "acuity_reasons": acuity_reasons,
-            "acuity_sources": [],
+            "acuity_sources": ["SATS (South African Triage Scale)"],
             "conditions": conditions,
             "condition_symptoms": condition_symptoms,
             "needs_assessment": True,
             "assessment_questions": assessment_questions,
         }
+
+        # Add SATS-specific fields
+        sats_colour = vitals_acuity.get("sats_colour")
+        if sats_colour:
+            result["sats_colour"] = sats_colour
+            result["sats_priority"] = vitals_acuity.get("sats_priority", "")
+            result["tews_score"] = vitals_acuity.get("tews_score", 0)
+            result["sats_target_minutes"] = vitals_acuity.get("target_minutes", 240)
+
+        return result
 
     def _build_condition_symptoms(
         self,

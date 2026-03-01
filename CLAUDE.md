@@ -1,126 +1,130 @@
-# CareMate Backend — Project Memory
+# CareMate Backend — Project Context
 
 ## What This Project Is
-Clinical decision support tool for South African primary healthcare nurses. Helps with triage by matching patient symptoms to conditions in the SA Standard Treatment Guidelines (STG), returning ranked differentials, first-line medicines, danger signs, and referral criteria.
+Clinical decision support tool for South African primary healthcare nurses. Matches patient symptoms to conditions in the SA Standard Treatment Guidelines (STG), returning ranked differentials, first-line medicines, danger signs, and referral criteria. Built by Raheel Retiwalla with clinical guidance from Dr Tasleem Ras and Numaan.
+
+## Team
+- **Raheel Retiwalla** — Product & engineering (builds everything with Claude Code)
+- **Dr Tasleem Ras** — Clinical lead, quality improvement expert, 20 years SA public health
+- **Numaan** — Business development, clinic access, stakeholder management
 
 ## Project Location
 `~/Downloads/caremate-backend-v2`
 
-## Folder Structure
+## Current System Status (as of 2026-02-28)
+
+### What's Built and Live
+- **Backend**: FastAPI on Railway (`https://caremate-api-production.up.railway.app`), healthy
+- **Frontend**: Lovable React app (GitHub: `raheelr/caremateaihealth`), connected to backend
+- **Database**: Supabase + pgvector, 442 conditions, 12,732 clinical edges, 1,528 knowledge chunks
+- **Triage Agent**: Full pipeline — extract → expand → search → score → safety → synthesise
+- **Deep Test**: 65/65 conditions found (100% top-5 hit rate), EXCELLENT grade
+- **Performance**: 11-17s end-to-end (was 35-48s, optimised 2026-02-28)
+- **Deploy command**: `cd ~/Downloads/caremate-backend-v2 && railway up`
+
+### Folder Structure
 ```
 caremate-backend-v2/
-  db/              ← database connection, schema, migrations
+  agents/          ← triage agent + tools (BUILT)
+  api/             ← FastAPI server (BUILT, 6 endpoints)
+  safety/          ← safety checker (BUILT)
+  db/              ← database queries + schema
   ingestion/       ← STG PDF → knowledge graph pipeline (COMPLETE)
-  agents/          ← triage agent (IN PROGRESS)
-  api/             ← FastAPI server (TO BUILD)
-  safety/          ← safety checker (TO BUILD)
   venv/            ← Python virtual environment
-  stg.pdf          ← SA Standard Treatment Guidelines source document
-  requirements.txt
-  SETUP_GUIDE.md
+  stg.pdf          ← SA Standard Treatment Guidelines source
+  SATS-Manual-A5-LR-spreads.pdf  ← SA Triage Scale manual (TO INGEST)
 ```
 
-## Database — Supabase + pgvector
-- Host: Supabase (URL in .env as DATABASE_URL)
-- Extension: pgvector enabled
-- Key tables:
-  - `conditions` — 410 conditions extracted from STG
-  - `clinical_relationships` — 4,470 rows linking entities to conditions
-  - `clinical_entities` — symptoms, signs, risk factors, red flags
-  - `medicines` — 335 medicines with doses, routes, treatment lines
-  - `condition_medicines` — links medicines to conditions with treatment_line, dose, special_notes
-  - `referral_criteria` — when to refer for each condition
-  - `knowledge_chunks` — 975 text chunks for semantic search
+### Key Files
+- `api/main.py` — FastAPI app, CORS, connection pool
+- `api/models.py` — Pydantic models matching frontend contracts
+- `agents/triage_agent.py` — TriageAgent class (analyze + refine), deterministic synthesis
+- `agents/tools.py` — 6 tool handlers, batch DB queries, prevalence boost
+- `agents/embeddings.py` — Voyage AI wrapper (voyage-3-lite, 512 dims)
+- `safety/checker.py` — SafetyChecker (defense-in-depth review)
+- `db/database.py` — all query functions
 
-## Ingestion Pipeline — COMPLETE
-- Processed 356/444 sections (88 filtered: heading-only, redirects, non-clinical)
-- 410 conditions ingested (some resumed/retried)
-- QA validator: 9/10 vignettes passing
-- Failing vignette: V01 (PLHIV dysphagia typed as INDICATES not RED_FLAG — low priority)
-- Key files: `ingestion/pipeline.py`, `ingestion/extractor.py`, `ingestion/segmenter.py`
-- Resume command: `python3 ingestion/pipeline.py --pdf stg.pdf --resume`
-
-## QA Validator
-- File: `ingestion/qa_validator.py`
-- Run: `python3 ingestion/qa_validator.py`
-- 10 clinical vignettes covering: Oral Thrush, Depression, Hypertension, Diarrhoea
-
-## Triage Agent — IN PROGRESS
-Using standard Anthropic Python SDK with tool_use (NOT the Agent SDK — wrong tool for this use case).
-Model: claude-haiku-4-5-20251001 for tool calls (cheap, fast), claude-sonnet-4-6 for final synthesis.
-
-### Six tools planned:
-1. `extract_symptoms` — natural language → standardised clinical terms
-2. `expand_synonyms` — clinical terms → patient language variants
-3. `search_conditions` — symptoms → matching conditions from DB
-4. `score_differential` — rank conditions by symptom match + context
-5. `get_condition_detail` — full STG entry for one condition
-6. `check_safety_flags` — RED_FLAG features present? → escalation
-
-### Agent loop:
+### API Endpoints (Live)
 ```
-Nurse input → extract_symptoms → expand_synonyms → search_conditions
-           → score_differential → check_safety_flags
-           → enough info? → if no: ask follow-up question
-                          → if yes: return ranked differential + STG guidance
+POST /api/triage/analyze     ← main triage (complaint + vitals + patient → differential)
+POST /api/triage/refine      ← follow-up with assessment answers → re-ranked conditions
+POST /api/triage/enrich      ← condition treatment details
+POST /api/rag/query          ← RAG-based clinical question answering
+POST /api/prescribing/suggest-dosing  ← medication dosing
+GET  /api/health             ← health check (public, no API key)
 ```
+- API Key header: `X-API-Key`
 
-### How the knowledge graph lookup works:
-- Never do name search — always symptom match through clinical_relationships
-- Weights: diagnostic_feature=0.18, presenting_feature=0.12, associated_feature=0.08
-- RED_FLAG match adds 0.10 bonus
-- Context filtering: some conditions have prerequisites (hiv_positive, child_under_5)
-  → flag for confirmation rather than silently suppress
+### Triage Pipeline (3 LLM calls + DB queries)
+1. **Haiku**: Extract symptoms from complaint (temperature=0)
+2. **DB only**: expand_synonyms → search_conditions (batch CTE queries) → score → safety → details
+3. **Haiku**: Slim re-rank + assessment questions (~200 output tokens, max_tokens=1024)
+   - Condition_symptoms generated from DB clinical_entities (no LLM)
+   - Acuity computed deterministically from vitals thresholds
+   - Safety review runs in parallel with assessment generation
 
-## Frontend — Lovable React App
-- GitHub: https://github.com/raheelr/caremateaihealth
-- Currently uses its own AI logic (to be replaced with our backend)
-- The swap is one line: change API base URL to point to our Railway backend
-- Need to audit existing API contracts before building backend endpoints
-
-## Deployment Target
-- Backend: Railway (account exists)
-- Backend URL pattern: `https://caremate-api.railway.app`
-- Frontend: stays on Lovable/Vercel
-
-## API Endpoints to Build
-```
-POST /api/triage/encounter    ← start new encounter, returns encounter_id
-POST /api/triage/message      ← send nurse message, returns agent response
-GET  /api/conditions/:id      ← full condition detail
-GET  /api/health              ← health check for Railway
-```
-(Confirm these match Lovable frontend before finalising)
+### Current Acuity System (3-tier)
+- `routine` — normal vitals, no red flags (DEFAULT)
+- `priority` — mild vital abnormality (temp >= 39C, HR > 120/<50) OR single red flag
+- `urgent` — severe vitals (BP >= 180, SpO2 < 92, RR >= 30) OR multiple red flags
+- Computed in `_compute_vitals_acuity()` + safety review escalation guard
 
 ## Environment Variables (.env)
 ```
 DATABASE_URL=postgresql://...  ← Supabase connection string
 ANTHROPIC_API_KEY=...
+VOYAGE_API_KEY=...             ← Voyage AI for embeddings
+API_KEY=...                    ← Backend API key
 ```
 
 ## Python Environment
-Always activate venv first:
 ```bash
-cd ~/Downloads/caremate-backend-v2
-source venv/bin/activate
+cd ~/Downloads/caremate-backend-v2 && source venv/bin/activate
 ```
 
+---
+
+## Roadmap — Feb 28, 2026 Team Call Decisions
+
+### Validation Framework (3 phases, agreed with Tasleem)
+- **Phase I**: Tasleem writes clinical vignettes across 7 domains, run blind against CareMate, results on live dashboard. Confirmed.
+- **Phase II**: Tasleem creates standardised vignettes given to BOTH 5-10 clinicians AND CareMate. Clinician responses establish the "reasonable doctor norm" — CareMate must meet or exceed that norm. Same simulated cases for everyone.
+- **Phase III**: Feasibility testing in real nurse clinics (focus on nurse clinics, not GPs). Numaan managing clinic access via Tutuk.
+
+### Tier 1 — Immediate / Required for Validation
+1. **SATS integration** — Ingest `SATS-Manual-A5-LR-spreads.pdf` (SA Triage Scale training manual, shared by Tasleem). Extract colour-coded acuity rules (Red/Orange/Yellow/Green) and discriminator lists. Replaces/augments current hard-coded vitals thresholds with nationally standardised system. Every SA emergency department uses this. **Status: NOT STARTED** — PDF in project root, no code written.
+2. **Phase II clinician survey form** — Structured form where clinicians receive a vignette and record: differential diagnosis, triage level, recommended investigations, treatment plan, referral decision. Needs to be built before Phase II begins. **Status: FRONTEND SCAFFOLD ONLY** — `ValidationDashboard.tsx` exists with Phase I/II/III tabs. `clinical_vignettes` + `vignette_results` tables exist in Supabase. No backend endpoints for survey submission.
+3. **Regional/local prevalence tuning** — Probability ranking must account for local epidemiology (Western Cape vs KZN vs Limpopo — TB rates, HIV prevalence, malaria zones differ dramatically). Currently have SA-wide prevalence tiers (23 conditions with 1.15x-1.25x boost). **Status: ~80% DONE IN WORKTREE** — `wizardly-solomon` worktree has `agents/scoring_config.py` with centralized prevalence config. NOT merged to main.
+
+### Tier 2 — High Value, Near-Term
+4. **Investigation recommendations as structured output** — Labs/imaging from STG as discrete fields, not buried in text chunks
+5. **Care setting context switch** — `care_setting` parameter (primary/hospital/emergency) filtering knowledge corpus
+6. **Non-pharma interventions as structured output** — Lifestyle advice, counselling, physiotherapy referrals
+
+### Tier 3 — Strategic / Medium-Term
+7. **Longitudinal patient record (EHR layer)** — Patient history across encounters, continuity of care
+8. **Drug interaction / prescription clash checking** — Requires EHR layer
+9. **API-first / embeddable mode** — CareMate as embeddable API inside other EHRs
+
+### Tier 4 — Vision / Long-Term
+10. Real-time clinical oversight dashboard
+11. Multi-country / Africa expansion
+12. Paramedic / pre-hospital triage
+13. Multimodal input (glasses/audio)
+
+### Key Architectural Decisions from Call
+- **Stay focused on primary care first** — complete end-to-end before hospital/tertiary STGs
+- **Knowledge corpus will become multi-source** — needs `source_tag` column (stg_primary, sats_triage, stg_hospital) before ingesting SATS
+- **Scoring weights need clinician validation** — Phase II will reveal if 0.18/0.12/0.08 weights match how clinicians think
+- **Output format needs to expand** — add: structured investigations, non-pharma interventions, clearer refer yes/no, follow-up plan
+
+### Reference Documents
+- Meeting transcript: `Meeting started 2026_02_28 09_50 EST - Notes by Gemini.pdf` (in project root)
+- Prioritised plan: `Feb 28 2026 CAll with Tasleem and Numaan.pdf` (in project root)
+
 ## Key Architectural Decisions
-- Standard Anthropic SDK + tool_use, NOT the Claude Agent SDK (that's for code/file agents)
-- No agent frameworks (LangGraph, CrewAI) — unnecessary complexity for sequential workflow
-- One triage agent + one safety checker (separate Haiku call reviewing output before it reaches nurse)
+- Standard Anthropic SDK + tool_use (NOT Agent SDK, NOT LangGraph/CrewAI)
+- Haiku for all LLM calls (was Sonnet for synthesis, switched for speed)
 - Symptom matching through knowledge graph — never condition name lookup
-- FastAPI backend on Railway, React frontend stays on Lovable
-
-## Next Immediate Steps
-1. Read Lovable GitHub repo to understand existing API contracts
-2. Build `agents/triage_agent.py` with six tools
-3. Build `api/main.py` FastAPI wrapper
-4. Test localhost chat experience
-5. Deploy to Railway
-6. Point Lovable frontend at Railway URL
-
-## Session Notes
-- Previous work done in Claude.ai chat (context limit hit — switching to Claude Code)
-- Full transcript saved at: /mnt/transcripts/ (on Claude.ai infrastructure, not local)
-- ingestion_progress.json tracks all 356 conditions — do not delete
+- Deterministic synthesis: only assessment_questions + re-ranking use LLM
+- FastAPI backend on Railway, React frontend on Lovable

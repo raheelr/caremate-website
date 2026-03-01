@@ -25,61 +25,18 @@ from db.database import (
     resolve_to_canonical,
     vector_search_conditions,
 )
+from agents.scoring_config import (
+    SA_PREVALENCE_BOOST,
+    PREVALENCE_TIER,
+    NON_DISEASE_CHAPTERS,
+    NON_DISEASE_PENALTY,
+    NON_DISEASE_KEYWORDS,
+)
 
 logger = logging.getLogger(__name__)
 
-# South African PHC prevalence tiers (based on SA burden of disease data).
-# Conditions seen daily in SA PHC clinics get a small score boost (1.15x-1.25x)
-# when multiple conditions score similarly. This breaks ties in favour of the
-# epidemiologically more likely diagnosis.
-SA_PREVALENCE_BOOST = {
-    # Tier 1: Very high prevalence — seen multiple times daily in SA PHC
-    "high": 1.25,
-    # Tier 2: Common — seen regularly
-    "moderate": 1.15,
-    # Tier 3: Everything else — no boost
-}
-_PREVALENCE_TIER = {
-    # Respiratory
-    "17.2": "high",    # Asthma
-    "17.3.3": "high",  # Pneumonia
-    "17.3.1": "high",  # Influenza
-    "17.1.5": "high",  # COPD
-    "19.2": "high",    # Common cold
-    "19.6": "high",    # Tonsillitis/Pharyngitis
-    # Cardiovascular
-    "4.7": "high",     # Hypertension
-    "4.7.1": "high",   # Hypertension in adults
-    # Metabolic
-    "3.4": "high",     # Type 2 diabetes
-    "3.4.1": "high",   # Diabetes
-    # GI
-    "2.2": "high",     # Dyspepsia/heartburn
-    "2.9": "high",     # Diarrhoea
-    "2.1": "moderate",  # Abdominal pain
-    "2.3": "moderate",  # Peptic ulcer
-    # Infectious
-    "17.4.1": "high",  # Pulmonary TB
-    "10.7": "moderate", # Malaria
-    "8.2": "high",     # UTI
-    # STI
-    "12.1": "high",    # VDS
-    "12.5": "moderate", # GUS
-    # HIV
-    "11.1": "high",    # ART
-    # Mental health
-    "16.4.1": "moderate", # Depression
-    "16.3": "moderate",   # Anxiety
-    # Musculoskeletal
-    "14.5": "moderate", # Osteoarthritis
-    "14.3": "moderate", # Gout
-    # Dermatology
-    "5.8.2": "moderate", # Eczema
-    "5.5": "moderate",   # Fungal skin
-    # Paediatric
-    "2.9.1": "high",    # Paediatric diarrhoea
-    "17.1.2": "moderate", # Paediatric asthma
-}
+# Alias for backward compatibility with internal references
+_PREVALENCE_TIER = PREVALENCE_TIER
 
 
 def _apply_prevalence_boost(conditions: list[dict]) -> list[dict]:
@@ -97,13 +54,9 @@ def _apply_prevalence_boost(conditions: list[dict]) -> list[dict]:
     return conditions
 
 
-# Chapters/conditions that are NOT diseases — their edges often represent
-# side effects, eligibility criteria, or counseling topics rather than
-# presenting symptoms. Apply a 60% penalty unless the complaint explicitly
-# mentions the procedure.
-_NON_DISEASE_CHAPTERS = {13}  # Chapter 13: Immunisation
-_NON_DISEASE_KEYWORDS = {"vaccine", "vaccination", "immunisation", "immunization",
-                          "jab", "shot", "inject", "booster", "flu shot"}
+# Aliases for backward compatibility
+_NON_DISEASE_CHAPTERS = NON_DISEASE_CHAPTERS
+_NON_DISEASE_KEYWORDS = NON_DISEASE_KEYWORDS
 
 
 def _penalize_non_disease(conditions: list[dict], complaint: str) -> list[dict]:

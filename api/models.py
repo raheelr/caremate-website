@@ -72,6 +72,11 @@ class AnalyzeResponse(BaseModel):
     condition_symptoms: dict = {}                # {condition_name: [{id, question}]}
     needs_assessment: bool = True
     assessment_questions: list[AssessmentQuestion] = []
+    # SATS (South African Triage Scale) fields
+    sats_colour: Optional[str] = None            # "green" | "yellow" | "orange" | "red"
+    sats_priority: Optional[str] = None          # "Routine" | "Urgent" | "Very Urgent" | "Emergency"
+    tews_score: Optional[int] = None             # 0-7+
+    sats_target_minutes: Optional[int] = None    # 0, 10, 60, 240
 
 
 # ── POST /api/triage/refine ──────────────────────────────────────────────────
