@@ -430,17 +430,19 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
     if not original_symptoms:
         original_symptoms = symptoms
 
-    # Start embedding computation early — overlaps with DB work below.
-    # The Voyage API call takes 2-5s, so launching it before DB queries
-    # lets it run concurrently via run_in_executor.
+    # Vector search is a semantic safety net but adds ~4s (Voyage API call).
+    # Graph + synonym search finds all 65 deep-test conditions without it.
+    # Skip when caller requests it (e.g., triage_agent hot path).
     import asyncio
+    skip_vector = tool_input.get("_skip_vector_search", False)
     embedding_task = None
-    try:
-        from agents.embeddings import get_embedding
-        query_text = " ".join(original_symptoms)
-        embedding_task = asyncio.ensure_future(get_embedding(query_text))
-    except Exception:
-        pass
+    if not skip_vector:
+        try:
+            from agents.embeddings import get_embedding
+            query_text = " ".join(original_symptoms)
+            embedding_task = asyncio.ensure_future(get_embedding(query_text))
+        except Exception:
+            pass
 
     async with pool.acquire() as conn:
         # Build the original→canonical mapping for grouping
