@@ -361,36 +361,21 @@ async def handle_expand_synonyms(tool_input: dict, pool: asyncpg.Pool) -> dict:
         return {"original_terms": [], "expanded_terms": [], "canonical_matches": {}, "expansion_count": 0}
 
     async with pool.acquire() as conn:
-        # 1. Synonym rings — forward + reverse
-        forward = await conn.fetch("""
-            SELECT canonical_term, synonym
-            FROM synonym_rings
-            WHERE canonical_term = ANY($1::text[])
+        # 1. Synonym rings — forward + reverse + entity filter in one CTE
+        synonym_rows = await conn.fetch("""
+            WITH ring_matches AS (
+                SELECT synonym AS expanded FROM synonym_rings
+                WHERE canonical_term = ANY($1::text[])
+                UNION
+                SELECT canonical_term AS expanded FROM synonym_rings
+                WHERE synonym = ANY($1::text[])
+            )
+            SELECT DISTINCT rm.expanded
+            FROM ring_matches rm
+            JOIN clinical_entities ce
+                ON ce.canonical_name = rm.expanded AND ce.entity_type = 'SYMPTOM'
         """, terms)
-
-        reverse = await conn.fetch("""
-            SELECT canonical_term, synonym
-            FROM synonym_rings
-            WHERE synonym = ANY($1::text[])
-        """, terms)
-
-        # Collect synonym candidates
-        synonym_terms = set()
-        for row in forward:
-            synonym_terms.add(row["synonym"])
-        for row in reverse:
-            synonym_terms.add(row["canonical_term"])
-
-        # Filter synonym results: keep only SYMPTOM entities, discard condition names
-        if synonym_terms:
-            symptom_entities = await conn.fetch("""
-                SELECT canonical_name FROM clinical_entities
-                WHERE canonical_name = ANY($1::text[])
-                AND entity_type = 'SYMPTOM'
-            """, list(synonym_terms))
-            synonym_symptoms = {r["canonical_name"] for r in symptom_entities}
-        else:
-            synonym_symptoms = set()
+        synonym_symptoms = {r["expanded"] for r in synonym_rows}
 
         # 2. Fuzzy resolve: trigram + word overlap against clinical_entities
         canonical_map = await resolve_to_canonical(conn, terms)

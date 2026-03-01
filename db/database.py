@@ -639,66 +639,73 @@ async def resolve_to_canonical(
 ) -> dict:
     """
     Resolve extracted symptom terms to canonical entity names in the DB.
-    Uses three strategies:
-      1. Exact match on clinical_entities
-      2. Trigram similarity (pg_trgm) for close matches
-      3. Word overlap for semantic bridges (e.g. "sore throat" → "painful red throat")
+    Uses three strategies in batch (2 queries max instead of N-per-term):
+      1. Exact match + trigram similarity via LATERAL join (single query)
+      2. Word overlap for terms with < 3 matches (single query)
 
     Returns {original_term: [list of canonical matches]}.
     """
+    terms_lower = [t.lower().strip() for t in terms if t.strip()]
+    if not terms_lower:
+        return {}
+
+    results = {t: set() for t in terms_lower}
+
+    # Query 1: Batch exact + trigram for ALL terms via LATERAL join
+    rows = await conn.fetch("""
+        SELECT t.term, ce.canonical_name
+        FROM unnest($1::text[]) AS t(term)
+        JOIN LATERAL (
+            SELECT canonical_name
+            FROM clinical_entities
+            WHERE entity_type = 'SYMPTOM'
+            AND (canonical_name = t.term OR similarity(canonical_name, t.term) > 0.25)
+            ORDER BY similarity(canonical_name, t.term) DESC
+            LIMIT $2
+        ) ce ON TRUE
+    """, terms_lower, limit_per_term)
+
+    for r in rows:
+        term = r["term"]
+        if term in results:
+            results[term].add(r["canonical_name"])
+
+    # Query 2: Word overlap for terms with < 3 matches
     stop_words = {
         'with', 'that', 'from', 'this', 'have', 'been', 'more', 'than',
         'very', 'and', 'the', 'for', 'not', 'but', 'are', 'was', 'has',
         'also', 'only', 'some', 'when', 'into', 'over', 'such',
     }
+    overlap_words = []
+    word_to_terms: dict[str, list[str]] = {}
+    for term in terms_lower:
+        if len(results.get(term, set())) < 3:
+            words = [w for w in term.split() if len(w) > 3 and w not in stop_words]
+            for word in words[:3]:
+                overlap_words.append(word)
+                word_to_terms.setdefault(word, []).append(term)
 
-    results = {}
-    for term in terms:
-        term_lower = term.lower().strip()
-        if not term_lower:
-            continue
-
-        matches = set()
-
-        # 1. Exact match
-        exact = await conn.fetchval("""
-            SELECT canonical_name FROM clinical_entities
-            WHERE canonical_name = $1 AND entity_type = 'SYMPTOM'
-        """, term_lower)
-        if exact:
-            matches.add(exact)
-
-        # 2. Trigram similarity (threshold 0.25 to catch partial matches)
-        trig_rows = await conn.fetch("""
-            SELECT canonical_name, similarity(canonical_name, $1) as sim
+    if overlap_words:
+        # Build ILIKE patterns for all overlap words in one query
+        patterns = [f"%{w}%" for w in set(overlap_words)]
+        overlap_rows = await conn.fetch("""
+            SELECT canonical_name
             FROM clinical_entities
             WHERE entity_type = 'SYMPTOM'
-            AND similarity(canonical_name, $1) > 0.25
-            ORDER BY sim DESC
-            LIMIT $2
-        """, term_lower, limit_per_term)
-        for r in trig_rows:
-            matches.add(r["canonical_name"])
+            AND canonical_name ILIKE ANY($1::text[])
+            AND LENGTH(canonical_name) < 80
+        """, patterns)
 
-        # 3. Word overlap — extract significant words, find entities containing them
-        #    Only used when trigram found < 3 matches (avoids over-expanding well-matched terms)
-        if len(matches) < 3:
-            words = [w for w in term_lower.split() if len(w) > 3 and w not in stop_words]
-            for word in words[:3]:
-                word_rows = await conn.fetch("""
-                    SELECT canonical_name
-                    FROM clinical_entities
-                    WHERE entity_type = 'SYMPTOM'
-                    AND canonical_name ILIKE $1
-                    AND LENGTH(canonical_name) < 80
-                    LIMIT $2
-                """, f"%{word}%", limit_per_term)
-                for r in word_rows:
-                    matches.add(r["canonical_name"])
+        for r in overlap_rows:
+            name = r["canonical_name"]
+            name_lower = name.lower()
+            for word, parent_terms in word_to_terms.items():
+                if word in name_lower:
+                    for pt in parent_terms:
+                        if len(results[pt]) < limit_per_term + 3:
+                            results[pt].add(name)
 
-        results[term_lower] = sorted(matches)
-
-    return results
+    return {t: sorted(v) for t, v in results.items()}
 
 
 async def get_red_flag_matches(
