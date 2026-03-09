@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CareMate — AI-Native Clinical Platform for Primary Healthcare</title>
+<meta name="description" content="CareMate is an AI-native clinical platform — knowledge graph, LLM agents, and intelligent EHR — built from the ground up to give frontline healthcare workers guideline-based decision support at the point of care.">
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   DESIGN SYSTEM
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  --slate-900: #0f172a;
+  --slate-800: #1e293b;
+  --slate-700: #334155;
+  --slate-600: #475569;
+  --slate-500: #64748b;
+  --slate-400: #94a3b8;
+  --slate-300: #cbd5e1;
+  --slate-200: #e2e8f0;
+  --slate-100: #f1f5f9;
+  --slate-50: #f8fafc;
+  --blue-700: #1d4ed8;
+  --blue-600: #2563eb;
+  --blue-500: #3b82f6;
+  --blue-400: #60a5fa;
+  --blue-100: #dbeafe;
+  --blue-50: #eff6ff;
+  --green-600: #16a34a;
+  --green-500: #22c55e;
+  --green-100: #dcfce7;
+  --green-50: #f0fdf4;
+  --amber-600: #d97706;
+  --amber-500: #f59e0b;
+  --amber-100: #fef3c7;
+  --amber-50: #fffbeb;
+  --red-600: #dc2626;
+  --red-500: #ef4444;
+  --red-100: #fee2e2;
+  --purple-600: #9333ea;
+  --purple-500: #a855f7;
+  --purple-100: #f3e8ff;
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', Consolas, monospace;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.1);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1);
+  --shadow-xl: 0 20px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-body);
+  color: var(--slate-800);
+  background: #fff;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   NAVIGATION
+   ═══════════════════════════════════════════════════════════════ */
+nav {
+  position: fixed; top: 0; left: 0; right: 0;
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--slate-200);
+  z-index: 100;
+  padding: 0 24px;
+}
+.nav-inner {
+  max-width: 1100px; margin: 0 auto;
+  display: flex; align-items: center; justify-content: space-between;
+  height: 64px;
+}
+.nav-logo {
+  font-size: 20px; font-weight: 800; color: var(--slate-900);
+  text-decoration: none; letter-spacing: -0.5px;
+}
+.nav-logo span { color: var(--blue-600); }
+.nav-links { display: flex; gap: 32px; align-items: center; }
+.nav-links a {
+  font-size: 14px; font-weight: 500; color: var(--slate-600);
+  text-decoration: none; transition: color 0.2s;
+}
+.nav-links a:hover { color: var(--slate-900); }
+.nav-cta {
+  padding: 8px 20px; background: var(--blue-600); color: #fff !important;
+  border-radius: 8px; font-weight: 600 !important; font-size: 13px !important;
+  transition: background 0.2s, transform 0.2s;
+}
+.nav-cta:hover { background: var(--blue-700); transform: translateY(-1px); }
+
+.nav-toggle { display: none; background: none; border: none; cursor: pointer; padding: 8px; }
+.nav-toggle span { display: block; width: 20px; height: 2px; background: var(--slate-700); margin: 5px 0; transition: 0.3s; }
+
+@media (max-width: 768px) {
+  .nav-toggle { display: block; }
+  .nav-links {
+    display: none; position: absolute; top: 64px; left: 0; right: 0;
+    background: #fff; flex-direction: column; padding: 24px; gap: 16px;
+    border-bottom: 1px solid var(--slate-200); box-shadow: var(--shadow-lg);
+  }
+  .nav-links.open { display: flex; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SECTIONS
+   ═══════════════════════════════════════════════════════════════ */
+.container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+
+section { padding: 100px 0; }
+section:first-of-type { padding-top: 0; }
+
+.section-label {
+  font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 2px; color: var(--blue-600); margin-bottom: 8px;
+}
+h1 { font-size: 56px; font-weight: 800; line-height: 1.1; letter-spacing: -2px; color: var(--slate-900); }
+h2 { font-size: 36px; font-weight: 700; line-height: 1.2; letter-spacing: -1px; color: var(--slate-900); margin-bottom: 16px; }
+h3 { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+p { margin-bottom: 16px; color: var(--slate-600); }
+.lead { font-size: 20px; color: var(--slate-500); line-height: 1.7; max-width: 680px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   HERO
+   ═══════════════════════════════════════════════════════════════ */
+.hero {
+  min-height: 100vh; display: flex; align-items: center;
+  background: linear-gradient(160deg, var(--slate-900) 0%, #1a2744 50%, var(--slate-800) 100%);
+  padding-top: 64px; color: #fff;
+}
+.hero-inner { max-width: 1100px; margin: 0 auto; padding: 80px 24px; }
+.hero-badge {
+  display: inline-block; padding: 6px 16px;
+  background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3);
+  border-radius: 20px; font-size: 13px; font-weight: 600; color: var(--blue-400);
+  margin-bottom: 24px;
+}
+.hero h1 { max-width: 780px; margin-bottom: 24px; color: #fff; }
+.hero h1 em { font-style: normal; color: var(--blue-400); }
+.hero .lead { margin-bottom: 40px; color: var(--slate-400); max-width: 680px; }
+.hero-cta { display: flex; gap: 16px; flex-wrap: wrap; }
+.btn-primary {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 32px; background: var(--blue-600); color: #fff;
+  border-radius: 10px; font-size: 16px; font-weight: 700;
+  text-decoration: none; transition: all 0.2s;
+  box-shadow: var(--shadow-md);
+}
+.btn-primary:hover { background: var(--blue-500); transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+.btn-secondary {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 32px; background: transparent; color: var(--slate-300);
+  border: 2px solid var(--slate-600); border-radius: 10px;
+  font-size: 16px; font-weight: 600; text-decoration: none; transition: all 0.2s;
+}
+.btn-secondary:hover { border-color: var(--slate-400); color: #fff; }
+
+/* ═══════════════════════════════════════════════════════════════
+   STATS BAR
+   ═══════════════════════════════════════════════════════════════ */
+.stats-bar {
+  background: #fff; color: var(--slate-900);
+  padding: 48px 24px; border-bottom: 1px solid var(--slate-200);
+}
+.stats-inner {
+  max-width: 1100px; margin: 0 auto;
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 32px;
+  text-align: center;
+}
+.stat-number { font-size: 48px; font-weight: 800; line-height: 1; }
+.stat-number.blue { color: var(--blue-600); }
+.stat-number.green { color: var(--green-600); }
+.stat-number.amber { color: var(--amber-600); }
+.stat-label { font-size: 14px; color: var(--slate-500); margin-top: 4px; }
+
+@media (max-width: 768px) {
+  .stats-inner { grid-template-columns: repeat(2, 1fr); gap: 24px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THESIS SECTION
+   ═══════════════════════════════════════════════════════════════ */
+.thesis-section { background: var(--slate-50); }
+.thesis-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 48px; margin-top: 40px;
+  align-items: start;
+}
+.thesis-left h3 { font-size: 24px; color: var(--slate-900); margin-bottom: 16px; line-height: 1.3; }
+.thesis-left p { font-size: 16px; }
+.thesis-right {
+  background: var(--slate-900); color: var(--slate-300); border-radius: 16px;
+  padding: 32px; font-size: 15px; line-height: 1.8;
+}
+.thesis-right .highlight { color: var(--blue-400); font-weight: 600; }
+
+@media (max-width: 768px) {
+  .thesis-grid { grid-template-columns: 1fr; gap: 32px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PROBLEM SECTION
+   ═══════════════════════════════════════════════════════════════ */
+.problem-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 40px;
+}
+.problem-card {
+  padding: 32px; background: var(--slate-50); border-radius: 16px;
+  border: 1px solid var(--slate-200);
+}
+.problem-card .icon { font-size: 32px; margin-bottom: 16px; }
+.problem-card h3 { color: var(--slate-900); }
+.problem-card p { font-size: 15px; margin-bottom: 0; }
+
+@media (max-width: 900px) {
+  .problem-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 600px) {
+  .problem-grid { grid-template-columns: 1fr; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PLATFORM COMPONENTS
+   ═══════════════════════════════════════════════════════════════ */
+.platform-section { background: var(--slate-50); }
+
+.component-knowledge {
+  padding: 40px; background: #fff; border-radius: 16px;
+  border: 1px solid var(--slate-200); box-shadow: var(--shadow-sm);
+  border-top: 4px solid var(--blue-500); margin-bottom: 24px;
+}
+.component-knowledge .meta {
+  display: flex; gap: 24px; flex-wrap: wrap; margin-top: 16px;
+  font-size: 14px; color: var(--slate-500);
+}
+
+.agents-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px;
+  margin-bottom: 24px;
+}
+.agent-card {
+  padding: 32px; background: #fff; border-radius: 16px;
+  border: 1px solid var(--slate-200); box-shadow: var(--shadow-sm);
+  border-top: 4px solid transparent;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.agent-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-lg); }
+.agent-card.triage { border-top-color: var(--green-500); }
+.agent-card.encounter { border-top-color: var(--amber-500); }
+.agent-card.assistant { border-top-color: var(--purple-500); }
+.agent-card .agent-icon { font-size: 36px; margin-bottom: 16px; }
+.agent-card h3 { margin-bottom: 12px; }
+.agent-card p { font-size: 15px; }
+.agent-card .agent-detail {
+  font-size: 13px; color: var(--blue-600); font-weight: 600; margin-top: 12px; margin-bottom: 0;
+}
+
+.component-ehr {
+  padding: 40px; background: #fff; border-radius: 16px;
+  border: 1px solid var(--slate-200); box-shadow: var(--shadow-sm);
+  border-top: 4px solid var(--slate-600);
+}
+.ehr-features {
+  display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px;
+}
+.ehr-tag {
+  padding: 6px 14px; background: var(--slate-100); border-radius: 8px;
+  font-size: 13px; font-weight: 600; color: var(--slate-700);
+}
+
+/* Flow diagram */
+.flow-diagram {
+  display: flex; align-items: center; justify-content: center;
+  gap: 0; margin: 48px 0 0; flex-wrap: wrap;
+}
+.flow-box {
+  padding: 14px 20px; background: #fff; border: 2px solid var(--slate-300);
+  border-radius: 10px; font-size: 14px; font-weight: 600;
+  text-align: center; min-width: 130px;
+}
+.flow-box small { display: block; font-weight: 400; font-size: 12px; color: var(--slate-500); margin-top: 2px; }
+.flow-arrow { font-size: 22px; color: var(--slate-400); padding: 0 8px; }
+
+@media (max-width: 768px) {
+  .agents-grid { grid-template-columns: 1fr; }
+  .flow-diagram { flex-direction: column; }
+  .flow-arrow { transform: rotate(90deg); }
+  h1 { font-size: 36px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   HOW IT WORKS
+   ═══════════════════════════════════════════════════════════════ */
+.steps-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; margin-top: 40px;
+}
+.step-card { text-align: left; padding: 28px; border-radius: 16px; }
+.step-num {
+  width: 48px; height: 48px; border-radius: 50%;
+  background: var(--blue-600); color: #fff;
+  font-size: 20px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-bottom: 16px;
+}
+.step-card h3 { margin-bottom: 8px; }
+.step-card p { font-size: 15px; }
+
+@media (max-width: 768px) {
+  .steps-grid { grid-template-columns: 1fr !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TECHNOLOGY SECTION
+   ═══════════════════════════════════════════════════════════════ */
+.tech-section { background: var(--slate-900); color: #fff; }
+.tech-section h2 { color: #fff; }
+.tech-section .section-label { color: var(--blue-400); }
+.tech-section .lead { color: var(--slate-400); }
+
+.tech-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 40px;
+}
+.tech-card {
+  padding: 32px; background: var(--slate-800); border-radius: 16px;
+  border: 1px solid var(--slate-700);
+}
+.tech-card .tech-icon { font-size: 32px; margin-bottom: 16px; }
+.tech-card h3 { color: #fff; margin-bottom: 8px; }
+.tech-card p { color: var(--slate-400); font-size: 15px; margin-bottom: 0; }
+.tech-card .tech-tag {
+  display: inline-block; padding: 3px 10px; background: rgba(59,130,246,0.15);
+  border: 1px solid rgba(59,130,246,0.3); border-radius: 6px;
+  font-size: 11px; font-weight: 600; color: var(--blue-400);
+  text-transform: uppercase; letter-spacing: 0.5px; margin-top: 12px;
+}
+
+@media (max-width: 900px) {
+  .tech-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 600px) {
+  .tech-grid { grid-template-columns: 1fr; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   VALIDATION
+   ═══════════════════════════════════════════════════════════════ */
+.validation-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 40px;
+}
+.val-card {
+  padding: 32px; background: #fff; border-radius: 16px;
+  border: 1px solid var(--slate-200); box-shadow: var(--shadow-sm);
+}
+.val-card h3 { color: var(--slate-900); margin-bottom: 8px; }
+.val-card p { font-size: 15px; }
+.val-stat { font-size: 48px; font-weight: 800; color: var(--blue-600); line-height: 1; margin-bottom: 8px; }
+.val-grade {
+  display: inline-block; padding: 4px 12px; background: var(--green-100);
+  color: var(--green-600); border-radius: 6px; font-size: 12px; font-weight: 700;
+  text-transform: uppercase; margin-top: 8px;
+}
+
+@media (max-width: 768px) {
+  .validation-grid { grid-template-columns: 1fr; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DESIGN PRINCIPLES
+   ═══════════════════════════════════════════════════════════════ */
+.principles-section { background: var(--slate-50); }
+.principles-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 40px;
+}
+.principle-card {
+  padding: 28px; background: #fff; border-radius: 16px;
+  border: 1px solid var(--slate-200); box-shadow: var(--shadow-sm);
+}
+.principle-card .icon { font-size: 28px; margin-bottom: 12px; }
+.principle-card h3 { font-size: 18px; margin-bottom: 8px; }
+.principle-card p { font-size: 14px; margin-bottom: 0; }
+
+@media (max-width: 900px) {
+  .principles-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 600px) {
+  .principles-grid { grid-template-columns: 1fr; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CTA SECTION
+   ═══════════════════════════════════════════════════════════════ */
+.cta-section {
+  background: linear-gradient(160deg, var(--blue-600) 0%, var(--blue-700) 100%);
+  color: #fff; text-align: center;
+}
+.cta-section h2 { color: #fff; }
+.cta-section p { color: rgba(255,255,255,0.8); max-width: 560px; margin: 0 auto 32px; font-size: 18px; }
+.btn-white {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 36px; background: #fff; color: var(--blue-700);
+  border-radius: 10px; font-size: 16px; font-weight: 700;
+  text-decoration: none; transition: all 0.2s;
+  box-shadow: var(--shadow-md);
+}
+.btn-white:hover { transform: translateY(-2px); box-shadow: var(--shadow-xl); }
+
+/* ═══════════════════════════════════════════════════════════════
+   FOOTER
+   ═══════════════════════════════════════════════════════════════ */
+footer {
+  background: var(--slate-900); color: var(--slate-400);
+  padding: 48px 24px; text-align: center; font-size: 14px;
+}
+footer a { color: var(--slate-300); text-decoration: none; }
+footer a:hover { color: #fff; }
+.footer-links { display: flex; gap: 24px; justify-content: center; margin-bottom: 16px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   ANIMATIONS
+   ═══════════════════════════════════════════════════════════════ */
+.fade-in {
+  opacity: 0; transform: translateY(24px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+.fade-in.visible { opacity: 1; transform: translateY(0); }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     NAVIGATION
+     ═══════════════════════════════════════════════════════════════ -->
+<nav>
+  <div class="nav-inner">
+    <a href="#" class="nav-logo">Care<span>Mate</span></a>
+    <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')" aria-label="Toggle menu">
+      <span></span><span></span><span></span>
+    </button>
+    <div class="nav-links">
+      <a href="#platform">Platform</a>
+      <a href="#how-it-works">How It Works</a>
+      <a href="#technology">Technology</a>
+      <a href="#validation">Validation</a>
+      <a href="#contact" class="nav-cta">Get in Touch</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     HERO
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="hero" id="hero">
+  <div class="hero-inner">
+    <div class="hero-badge">AI-native clinical intelligence for LMICs</div>
+    <h1>Not a digitised manual.<br>An <em>intelligent</em> clinical platform.</h1>
+    <p class="lead">
+      CareMate is built from the ground up to be intelligent. A clinical knowledge graph, three specialised LLM-powered agents, and an AI-native EHR that work together so the system reasons, remembers, and guides &mdash; not just retrieves. Every layer has AI at its core. Nothing is bolted on.
+    </p>
+    <div class="hero-cta">
+      <a href="#platform" class="btn-primary">Explore the Platform &darr;</a>
+      <a href="#contact" class="btn-secondary">Partner with Us</a>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     STATS BAR
+     ═══════════════════════════════════════════════════════════════ -->
+<div class="stats-bar">
+  <div class="stats-inner">
+    <div>
+      <div class="stat-number blue">335</div>
+      <div class="stat-label">Conditions in Knowledge Graph</div>
+    </div>
+    <div>
+      <div class="stat-number green">12,050</div>
+      <div class="stat-label">Typed Clinical Edges</div>
+    </div>
+    <div>
+      <div class="stat-number amber">92/92</div>
+      <div class="stat-label">Search Accuracy</div>
+    </div>
+    <div>
+      <div class="stat-number blue">&lt;10s</div>
+      <div class="stat-label">AI Reasoning Time</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     THESIS
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="thesis-section" id="thesis">
+  <div class="container fade-in">
+    <div class="thesis-grid">
+      <div class="thesis-left">
+        <div class="section-label">The Core Thesis</div>
+        <h3>An EHR where the AI has read the full patient record before the clinician even opens the chart.</h3>
+        <p>Most clinical decision support tools are search engines with a medical skin. They wait for you to ask the right question, then return a list of results. CareMate is different. It <strong>reasons</strong> over a structured knowledge graph to generate differential diagnoses. It <strong>guides</strong> treatment step by step. It <strong>remembers</strong> every patient encounter and uses that history to make the next one better. Intelligence isn't a feature &mdash; it's the architecture.</p>
+      </div>
+      <div class="thesis-right">
+        <p style="margin-bottom:20px;">Traditional tools:</p>
+        <p style="margin-bottom:4px;">Nurse types symptom &rarr; gets a list of articles</p>
+        <p style="margin-bottom:4px;">Nurse types drug name &rarr; gets a dosing table</p>
+        <p style="margin-bottom:24px;">Patient returns &rarr; starts from scratch</p>
+        <p style="margin-bottom:20px;"><span class="highlight">CareMate:</span></p>
+        <p style="margin-bottom:4px;">Nurse describes complaint &rarr; AI returns <span class="highlight">ranked differential + triage acuity + safety review</span></p>
+        <p style="margin-bottom:4px;">Diagnosis confirmed &rarr; AI walks through <span class="highlight">treatment protocol + prescribing + discharge</span></p>
+        <p style="margin-bottom:0;">Patient returns &rarr; AI has already read <span class="highlight">full history, medications, care gaps</span></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     THE PROBLEM
+     ═══════════════════════════════════════════════════════════════ -->
+<section id="problem">
+  <div class="container fade-in">
+    <div class="section-label">Why This Matters</div>
+    <h2>Primary healthcare is fragmented at every step</h2>
+    <p class="lead">
+      Across low- and middle-income countries, frontline primary care workers face interconnected challenges that no single point solution can address.
+    </p>
+
+    <div class="problem-grid">
+      <div class="problem-card">
+        <div class="icon">&#128218;</div>
+        <h3>Guidelines sit on shelves</h3>
+        <p>Hundreds of pages of clinical protocols indexed by diagnosis &mdash; which requires knowing the answer before asking the question. No system <em>reasons from symptoms to conditions</em>.</p>
+      </div>
+      <div class="problem-card">
+        <div class="icon">&#128100;</div>
+        <h3>No memory between visits</h3>
+        <p>Patients see a different nurse every visit. Paper records get lost. No system <em>remembers the patient and alerts the clinician</em> to what matters.</p>
+      </div>
+      <div class="problem-card">
+        <div class="icon">&#9201;</div>
+        <h3>Treatment is unstructured</h3>
+        <p>From diagnosis to prescribing to discharge: ad hoc. Drug interactions unchecked, care gaps invisible. No system <em>guides the encounter step by step</em>.</p>
+      </div>
+      <div class="problem-card">
+        <div class="icon">&#128202;</div>
+        <h3>Oversight is retrospective</h3>
+        <p>Weekly chart audits after the damage is done. No system provides <em>real-time visibility into clinical decision-making</em>.</p>
+      </div>
+      <div class="problem-card">
+        <div class="icon">&#127759;</div>
+        <h3>No specialist at the bedside</h3>
+        <p>Rural clinics bear the highest disease burden with the fewest diagnostic tools. No system <em>answers clinical questions on demand</em> from trusted sources.</p>
+      </div>
+      <div class="problem-card">
+        <div class="icon">&#128268;</div>
+        <h3>Disconnected silos</h3>
+        <p>Triage, treatment, records, and oversight exist as separate tools that don't share data. No system <em>integrates the full arc</em> of a patient encounter.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     PLATFORM — 5 COMPONENTS
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="platform-section" id="platform">
+  <div class="container fade-in">
+    <div class="section-label">The CareMate Clinical AI Platform</div>
+    <h2>Five AI-powered components, one intelligent system</h2>
+    <p class="lead">
+      Not five separate tools stitched together. One platform where a knowledge graph, three LLM-powered agents, and an AI-native EHR share context and reason together.
+    </p>
+
+    <!-- Component 1: Knowledge Model -->
+    <div class="component-knowledge">
+      <h3 style="color:var(--blue-600);">1. Clinical Knowledge Graph</h3>
+      <p style="font-size:16px;"><strong>The structured intelligence layer.</strong> National treatment guidelines transformed into a typed knowledge graph &mdash; not flat text, but a web of relationships between conditions, symptoms, medicines, danger signs, and referral criteria. Semantic embeddings enable fuzzy matching. Patient-language synonyms bridge the gap between how patients talk and how guidelines are written. Every agent reasons over this graph.</p>
+      <div class="meta">
+        <span>&#8226; 335 conditions (SA STG)</span>
+        <span>&#8226; 12,050 typed clinical edges</span>
+        <span>&#8226; 1,532 knowledge chunks with embeddings</span>
+        <span>&#8226; Multi-language synonym expansion</span>
+        <span>&#8226; Multi-country, multi-source architecture</span>
+      </div>
+    </div>
+
+    <!-- Components 2-4: Three Agents -->
+    <div class="agents-grid">
+      <div class="agent-card triage">
+        <div class="agent-icon">&#x1F50D;</div>
+        <h3 style="color:var(--green-600);">2. Triage Agent</h3>
+        <p><strong>AI that reasons from symptoms to conditions.</strong> Extracts clinical features from free-text complaints using an LLM, expands them through the knowledge graph, scores conditions across multiple dimensions (symptom match, prevalence, demographics, vitals), and returns a ranked differential with nationally standardised SATS triage acuity &mdash; all safety-reviewed.</p>
+        <p class="agent-detail">LLM extraction + graph reasoning + deterministic scoring</p>
+      </div>
+      <div class="agent-card encounter">
+        <div class="agent-icon">&#x1F4CB;</div>
+        <h3 style="color:var(--amber-600);">3. Encounter Agent</h3>
+        <p><strong>AI that guides treatment decisions.</strong> Walks the nurse from confirmed diagnosis through the guideline treatment protocol: first-line medicines with weight-based dosing, non-pharma interventions, referral criteria, and discharge planning. Checks drug interactions against patient history. Flags stock-outs and suggests STG-compliant alternatives.</p>
+        <p class="agent-detail">Structured workflow + medication intelligence</p>
+      </div>
+      <div class="agent-card assistant">
+        <div class="agent-icon">&#x1F4AC;</div>
+        <h3 style="color:var(--purple-600);">4. Clinical Assistant</h3>
+        <p><strong>AI that answers clinical questions instantly.</strong> Retrieval-augmented generation (RAG) grounded in guideline source text. Medication dosing, red flag checks, patient education &mdash; cited back to the exact STG paragraph. Like having a clinical reference librarian who has read every page of every guideline, on call 24/7.</p>
+        <p class="agent-detail">RAG + semantic search + source citation</p>
+      </div>
+    </div>
+
+    <!-- Component 5: EHR -->
+    <div class="component-ehr">
+      <h3 style="color:var(--slate-700);">5. CareMate EHR &mdash; The AI Memory Layer</h3>
+      <p style="font-size:16px;"><strong>Not just a record system &mdash; a context engine for the agents.</strong> A lightweight EHR that gives every agent longitudinal patient context. The Triage Agent doesn't ask "what's wrong?" &mdash; it asks "what's wrong <em>given that this patient has diabetes, was seen 3 months ago for the same complaint, and had a rash from Amoxicillin?</em>" AI-generated visit summaries tell the next clinician what happened and <em>why it matters</em>. Care gaps are surfaced proactively. The system gets smarter with every encounter.</p>
+      <div class="ehr-features">
+        <span class="ehr-tag">Longitudinal patient record</span>
+        <span class="ehr-tag">AI-generated visit narratives</span>
+        <span class="ehr-tag">Active problem &amp; medication lists</span>
+        <span class="ehr-tag">Proactive continuity alerts</span>
+        <span class="ehr-tag">Care gap detection</span>
+        <span class="ehr-tag">Medication clash prevention</span>
+        <span class="ehr-tag">Stock-out awareness</span>
+        <span class="ehr-tag">Clinical oversight dashboard</span>
+        <span class="ehr-tag">FHIR-ready interoperability</span>
+      </div>
+    </div>
+
+    <!-- Flow diagram -->
+    <div class="flow-diagram">
+      <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-50);">National Guidelines<small>STG, SATS, EML</small></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box" style="border-color:var(--blue-500);">Knowledge Graph<small>AI-structured clinical DB</small></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box" style="border-color:var(--green-500); background:var(--green-50);">Triage Agent<small>LLM reasoning</small></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box" style="border-color:var(--amber-500); background:var(--amber-50);">Encounter Agent<small>Guided workflow</small></div>
+      <span class="flow-arrow">&harr;</span>
+      <div class="flow-box" style="border-color:var(--purple-500); background:var(--purple-100);">Clinical Assistant<small>RAG Q&amp;A</small></div>
+    </div>
+    <div class="flow-diagram" style="margin-top:8px;">
+      <div class="flow-box" style="border-color:var(--slate-600); background:var(--slate-100); min-width:100%; border-width:2px;">
+        CareMate EHR &mdash; AI Memory Layer
+        <small>Longitudinal patient context shared across all agents, all encounters, all clinicians</small>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     PATIENT JOURNEY
+     ═══════════════════════════════════════════════════════════════ -->
+<section id="how-it-works">
+  <div class="container fade-in">
+    <div class="section-label">The Patient Journey</div>
+    <h2>Intelligence at every step of the encounter</h2>
+    <p class="lead">
+      From the moment a patient walks in to their next follow-up visit, every step is AI-assisted.
+    </p>
+
+    <div class="steps-grid">
+      <div class="step-card" style="background:var(--green-50);">
+        <div class="step-num" style="background:var(--green-600);">1</div>
+        <h3>Patient arrives &mdash; AI triage</h3>
+        <p>Nurse enters complaint and vitals. The Triage Agent <strong>reasons through the knowledge graph</strong>, returns a ranked differential with SATS acuity colour, danger signs, and targeted assessment questions &mdash; in under 10 seconds.</p>
+      </div>
+      <div class="step-card" style="background:var(--amber-50);">
+        <div class="step-num" style="background:var(--amber-600);">2</div>
+        <h3>Diagnosis confirmed &mdash; AI-guided treatment</h3>
+        <p>The Encounter Agent <strong>walks through the guideline protocol</strong>: first-line medicines with dosing, non-pharma interventions, referral criteria. Drug interactions checked against the patient's medication history.</p>
+      </div>
+      <div class="step-card" style="background:var(--purple-100);">
+        <div class="step-num" style="background:var(--purple-600);">3</div>
+        <h3>Question mid-encounter &mdash; AI answers</h3>
+        <p>The Clinical Assistant <strong>answers instantly from guideline source text</strong> via RAG. "What's the paediatric dose for Amoxicillin?" &mdash; cited, sourced, and context-aware.</p>
+      </div>
+      <div class="step-card" style="background:var(--slate-100);">
+        <div class="step-num" style="background:var(--slate-700);">4</div>
+        <h3>Patient returns &mdash; AI remembers</h3>
+        <p>The EHR <strong>generates an intelligent visit summary</strong> and persists the encounter. Next visit &mdash; even with a different nurse &mdash; CareMate shows the full history, surfaces care gaps, and alerts to continuity risks.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     TECHNOLOGY
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="tech-section" id="technology">
+  <div class="container fade-in">
+    <div class="section-label">Under the Hood</div>
+    <h2>Built on state-of-the-art AI infrastructure</h2>
+    <p class="lead">
+      Every architectural decision optimises for clinical accuracy, speed, and safety in low-resource environments.
+    </p>
+
+    <div class="tech-grid">
+      <div class="tech-card">
+        <div class="tech-icon">&#129504;</div>
+        <h3>LLM-Powered Agents</h3>
+        <p>Purpose-built AI agents using Anthropic's Claude models with structured tool use. Not prompt-and-pray &mdash; deterministic pipelines with LLM reasoning at targeted steps: symptom extraction, clinical re-ranking, and safety review.</p>
+        <div class="tech-tag">Anthropic Claude + Tool Use</div>
+      </div>
+      <div class="tech-card">
+        <div class="tech-icon">&#128302;</div>
+        <h3>Clinical Knowledge Graph</h3>
+        <p>National treatment guidelines transformed into a typed graph with 12,050 edges. Batch CTE queries, synonym expansion, and multi-dimensional scoring &mdash; no vector search needed. Graph reasoning outperforms embedding-only approaches.</p>
+        <div class="tech-tag">PostgreSQL + pgvector</div>
+      </div>
+      <div class="tech-card">
+        <div class="tech-icon">&#127919;</div>
+        <h3>Retrieval-Augmented Generation</h3>
+        <p>Clinical Q&amp;A grounded in 1,532 knowledge chunks with 512-dimensional semantic embeddings. Every answer cites the exact guideline paragraph. Hallucination-resistant by design &mdash; if it's not in the guidelines, it's not in the output.</p>
+        <div class="tech-tag">Voyage AI Embeddings + RAG</div>
+      </div>
+      <div class="tech-card">
+        <div class="tech-icon">&#128737;</div>
+        <h3>Safety-First Architecture</h3>
+        <p>Defence-in-depth: every triage output passes through an independent LLM safety review. Danger signs trigger automatic escalation. Medication clashes blocked. Acuity can only go up, never down, through the pipeline.</p>
+        <div class="tech-tag">Multi-Layer Safety Review</div>
+      </div>
+      <div class="tech-card">
+        <div class="tech-icon">&#9889;</div>
+        <h3>Optimised for Speed</h3>
+        <p>Under 10 seconds end-to-end in production. Batch CTE queries replaced per-term lookups (32s &rarr; 2s). Deterministic synthesis eliminated unnecessary LLM calls. Parallel async execution across all independent operations.</p>
+        <div class="tech-tag">FastAPI + Async Pipeline</div>
+      </div>
+      <div class="tech-card">
+        <div class="tech-icon">&#127760;</div>
+        <h3>Multi-Country by Architecture</h3>
+        <p>Country configuration model with source-tagged knowledge bases, pluggable triage systems (SATS, ETAT, custom), adaptive patient IDs, and per-country formularies. Add a country's guidelines &mdash; get a CareMate deployment.</p>
+        <div class="tech-tag">Configurable Per Country</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     VALIDATION
+     ═══════════════════════════════════════════════════════════════ -->
+<section id="validation">
+  <div class="container fade-in">
+    <div class="section-label">Clinical Validation</div>
+    <h2>Rigorously tested, not just demonstrated</h2>
+    <p class="lead">
+      Validated with real clinical vignettes across multiple domains by an independent clinician with 20 years of SA public health experience.
+    </p>
+
+    <div class="validation-grid">
+      <div class="val-card">
+        <div class="val-stat">92/92</div>
+        <h3>Deep Search Accuracy</h3>
+        <p>Every target condition found in top-5 results across 92 clinical test cases spanning the full breadth of the STG knowledge base.</p>
+        <div class="val-grade">97.8% Top-5 Accuracy</div>
+      </div>
+      <div class="val-card">
+        <div class="val-stat">96%</div>
+        <h3>Blind Clinical Vignettes</h3>
+        <p>30 vignettes by Dr Tasleem Ras across 6 domains (Pregnancy, Under 5, Schoolgoing, Adolescent, Adult, Geriatrics). 24/25 correct Top-1 when the knowledge base covers the condition.</p>
+        <div class="val-grade">Adjusted Top-1 Accuracy</div>
+      </div>
+      <div class="val-card">
+        <div class="val-stat" style="color:var(--green-600);">SATS</div>
+        <h3>Nationally Standardised Triage</h3>
+        <p>South African Triage Scale with TEWS vital sign scoring (7 components), clinical discriminators, and age-stratified thresholds. Not a homegrown system &mdash; the national standard, computed deterministically.</p>
+      </div>
+      <div class="val-card">
+        <div class="val-stat" style="color:var(--amber-600);">0</div>
+        <h3>Algorithm Failures</h3>
+        <p>Every missed case in Phase I validation was traced to a knowledge base gap (condition not in STG), not an algorithm failure. When the knowledge exists, the AI finds it.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     DESIGN PRINCIPLES
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="principles-section" id="principles">
+  <div class="container fade-in">
+    <div class="section-label">Design Principles</div>
+    <h2>Intelligent by design, not by decoration</h2>
+
+    <div class="principles-grid">
+      <div class="principle-card">
+        <div class="icon">&#128214;</div>
+        <h3>Guideline-grounded</h3>
+        <p>Every recommendation traces to a national treatment guideline. The AI reasons over structured clinical knowledge, not generic medical text from the internet.</p>
+      </div>
+      <div class="principle-card">
+        <div class="icon">&#127973;</div>
+        <h3>Nurse-first workflow</h3>
+        <p>Designed for 5-minute consultations in nurse-led clinics. Complaint in, differential out, protocol applied. Not a doctor's EHR shoehorned onto frontline workers.</p>
+      </div>
+      <div class="principle-card">
+        <div class="icon">&#127760;</div>
+        <h3>Multi-language understanding</h3>
+        <p>Patient-language synonyms in isiZulu, isiXhosa, Afrikaans. The AI understands how patients describe symptoms, not just clinical terminology.</p>
+      </div>
+      <div class="principle-card">
+        <div class="icon">&#128268;</div>
+        <h3>End-to-end, not point solution</h3>
+        <p>Triage, treatment, Q&amp;A, and patient records in one integrated platform where all components share context. No more stitching together disconnected tools.</p>
+      </div>
+      <div class="principle-card">
+        <div class="icon">&#127759;</div>
+        <h3>Multi-country from day one</h3>
+        <p>Country-configurable architecture: clinical guidelines, triage systems, formularies, ID systems, and languages. Built in South Africa, designed for global LMIC deployment.</p>
+      </div>
+      <div class="principle-card">
+        <div class="icon">&#128272;</div>
+        <h3>Safety is a layer, not a feature</h3>
+        <p>Independent safety review on every output. Danger sign escalation. Medication clash blocking. Acuity can only go up through the pipeline. Defence-in-depth, not afterthought.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     CTA
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="cta-section" id="contact">
+  <div class="container" style="padding: 0 24px;">
+    <h2>The future of frontline healthcare is intelligent</h2>
+    <p>We're looking for clinical partners, research institutions, and health system innovators who believe AI should be built into the foundation of primary care &mdash; not bolted on as an afterthought.</p>
+    <a href="mailto:hello@caremate.co.za" class="btn-white">Get in Touch &rarr;</a>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     FOOTER
+     ═══════════════════════════════════════════════════════════════ -->
+<footer>
+  <div class="footer-links">
+    <a href="#platform">Platform</a>
+    <a href="#technology">Technology</a>
+    <a href="#validation">Validation</a>
+    <a href="#contact">Contact</a>
+  </div>
+  <p>&copy; 2026 CareMate. AI-native clinical intelligence, built for the frontline.</p>
+</footer>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SCROLL ANIMATIONS
+     ═══════════════════════════════════════════════════════════════ -->
+<script>
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('visible');
+    }
+  });
+}, { threshold: 0.1 });
+
+document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+document.querySelectorAll('.nav-links a').forEach(link => {
+  link.addEventListener('click', () => {
+    document.querySelector('.nav-links').classList.remove('open');
+  });
+});
+
+document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+  anchor.addEventListener('click', function(e) {
+    e.preventDefault();
+    const target = document.querySelector(this.getAttribute('href'));
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
+});
+</script>
+
+</body>
+</html>
