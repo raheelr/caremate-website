@@ -1,0 +1,1813 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CareMate — Clinical AI Platform Overview</title>
+<style>
+/* ===================================================================
+   DESIGN SYSTEM
+   =================================================================== */
+:root {
+  --slate-900: #0f172a;
+  --slate-800: #1e293b;
+  --slate-700: #334155;
+  --slate-600: #475569;
+  --slate-500: #64748b;
+  --slate-400: #94a3b8;
+  --slate-300: #cbd5e1;
+  --slate-200: #e2e8f0;
+  --slate-100: #f1f5f9;
+  --slate-50: #f8fafc;
+  --blue-600: #2563eb;
+  --blue-500: #3b82f6;
+  --blue-400: #60a5fa;
+  --blue-100: #dbeafe;
+  --red-600: #dc2626;
+  --red-500: #ef4444;
+  --red-100: #fee2e2;
+  --red-50: #fef2f2;
+  --green-600: #16a34a;
+  --green-500: #22c55e;
+  --green-100: #dcfce7;
+  --green-50: #f0fdf4;
+  --amber-600: #d97706;
+  --amber-500: #f59e0b;
+  --amber-100: #fef3c7;
+  --amber-50: #fffbeb;
+  --purple-500: #a855f7;
+  --purple-100: #f3e8ff;
+  --orange-600: #ea580c;
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-body);
+  color: var(--slate-800);
+  background: var(--slate-50);
+  line-height: 1.7;
+  display: flex;
+}
+
+/* ===================================================================
+   SIDEBAR
+   =================================================================== */
+.sidebar {
+  position: fixed; left: 0; top: 0;
+  width: 260px; height: 100vh;
+  background: var(--slate-900);
+  color: var(--slate-300);
+  padding: 24px 16px;
+  overflow-y: auto;
+  z-index: 100;
+  display: flex; flex-direction: column;
+}
+
+.sidebar-header { margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--slate-700); }
+.sidebar-header h2 { font-size: 20px; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
+.sidebar-header p { font-size: 11px; color: var(--slate-400); margin-top: 2px; text-transform: uppercase; letter-spacing: 1px; }
+
+.sidebar .act-label {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px;
+  color: var(--slate-500); margin: 16px 0 6px 12px;
+}
+
+.progress-track { list-style: none; flex: 1; }
+.progress-track li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 12px; margin: 1px 0;
+  border-radius: 6px; cursor: pointer;
+  transition: all 0.2s;
+  font-size: 12px;
+}
+.progress-track li:hover { background: var(--slate-800); }
+.progress-track li.active { background: var(--slate-700); color: #fff; }
+.progress-track li.visited .dot { background: var(--green-500); }
+
+.dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--slate-600); flex-shrink: 0;
+  transition: all 0.3s;
+}
+.progress-track li.active .dot { background: var(--blue-500); box-shadow: 0 0 0 3px rgba(59,130,246,0.3); }
+
+/* ===================================================================
+   MAIN CONTENT
+   =================================================================== */
+.content { margin-left: 260px; flex: 1; min-height: 100vh; }
+
+.section {
+  min-height: 100vh; padding: 80px 60px 60px;
+  max-width: 900px; margin: 0 auto;
+  opacity: 0; transform: translateY(20px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+.section.visible { opacity: 1; transform: translateY(0); }
+#access-gap { opacity: 1; transform: none; }
+
+h1 { font-size: 48px; font-weight: 800; line-height: 1.1; letter-spacing: -1.5px; color: var(--slate-900); }
+h2 { font-size: 32px; font-weight: 700; line-height: 1.2; letter-spacing: -0.5px; margin-bottom: 16px; }
+h3 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+h4 { font-size: 16px; font-weight: 600; margin-bottom: 8px; color: var(--slate-700); }
+p { margin-bottom: 16px; color: var(--slate-600); }
+.lead { font-size: 18px; color: var(--slate-500); line-height: 1.8; }
+.section-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 2px; color: var(--blue-500); margin-bottom: 8px;
+}
+
+/* ===================================================================
+   STAT COUNTERS
+   =================================================================== */
+.stats-row { display: flex; gap: 32px; margin: 40px 0; flex-wrap: wrap; }
+.stat-card {
+  flex: 1; min-width: 160px; text-align: center;
+  padding: 24px; background: #fff; border-radius: 12px;
+  border: 1px solid var(--slate-200); box-shadow: var(--shadow-sm);
+}
+.stat-number { font-size: 42px; font-weight: 800; color: var(--slate-900); line-height: 1; }
+.stat-label { font-size: 13px; color: var(--slate-500); margin-top: 4px; }
+
+/* ===================================================================
+   CARDS
+   =================================================================== */
+.card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 24px 0; }
+.card-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin: 24px 0; }
+.card {
+  padding: 24px; background: #fff; border-radius: 12px;
+  border: 1px solid var(--slate-200); box-shadow: var(--shadow-sm);
+}
+.card h4 { color: var(--slate-800); margin-bottom: 8px; }
+.card p { font-size: 14px; margin-bottom: 0; }
+.card-icon { font-size: 28px; margin-bottom: 12px; }
+
+/* ===================================================================
+   GUARDRAILS
+   =================================================================== */
+.guardrail {
+  padding: 20px 20px 20px 24px;
+  border-radius: 10px; margin: 20px 0;
+  border-left: 4px solid;
+  font-size: 14px;
+}
+.guardrail-danger { background: var(--red-50); border-color: var(--red-500); }
+.guardrail-safe { background: var(--green-50); border-color: var(--green-500); }
+.guardrail-warning { background: var(--amber-50); border-color: var(--amber-500); }
+.guardrail-info { background: var(--blue-100); border-color: var(--blue-500); }
+.guardrail h4 { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
+.guardrail p { margin-bottom: 6px; font-size: 13px; }
+.guardrail .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+.guardrail .label-risk { color: var(--red-600); }
+.guardrail .label-prevent { color: var(--green-600); }
+.guardrail .label-impact { color: var(--blue-600); }
+
+/* ===================================================================
+   CODE BLOCKS
+   =================================================================== */
+.code-block {
+  background: var(--slate-800); color: #e2e8f0;
+  border-radius: 10px; margin: 16px 0; overflow: hidden;
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6;
+}
+.code-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 16px; background: var(--slate-900);
+  font-size: 11px; color: var(--slate-400);
+}
+.code-header .file-name { font-weight: 600; }
+.code-content { padding: 16px; overflow-x: auto; max-height: 200px; transition: max-height 0.3s; }
+.code-block.expanded .code-content { max-height: 2000px; }
+.code-toggle {
+  display: block; width: 100%; padding: 6px;
+  background: var(--slate-700); color: var(--slate-300);
+  border: none; cursor: pointer; font-size: 11px;
+  font-family: var(--font-body);
+}
+.code-toggle:hover { background: var(--slate-600); }
+.kw { color: #c084fc; }
+.str { color: #86efac; }
+.num { color: #fbbf24; }
+.cm { color: #64748b; }
+.fn { color: #60a5fa; }
+.op { color: #f472b6; }
+
+/* ===================================================================
+   JSON VIEWER
+   =================================================================== */
+.json-viewer {
+  background: var(--slate-800); color: #e2e8f0;
+  border-radius: 10px; padding: 20px; margin: 16px 0;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.7;
+  overflow-x: auto; max-height: 400px; overflow-y: auto;
+}
+.json-key { color: #93c5fd; }
+.json-str { color: #86efac; }
+.json-num { color: #fbbf24; }
+.json-bool { color: #c084fc; }
+
+/* ===================================================================
+   FLOW DIAGRAMS
+   =================================================================== */
+.flow-row { display: flex; align-items: center; gap: 0; margin: 24px 0; flex-wrap: wrap; }
+.flow-box {
+  padding: 12px 18px; background: #fff; border: 2px solid var(--slate-300);
+  border-radius: 10px; font-size: 13px; font-weight: 600;
+  text-align: center; min-width: 120px;
+  transition: all 0.3s;
+}
+.flow-box.active { border-color: var(--blue-500); background: var(--blue-100); }
+.flow-box.danger { border-color: var(--red-500); background: var(--red-100); }
+.flow-arrow { font-size: 20px; color: var(--slate-400); padding: 0 6px; }
+
+/* ===================================================================
+   TOGGLE PANELS
+   =================================================================== */
+.toggle-panel { margin: 20px 0; }
+.toggle-tabs { display: flex; gap: 0; margin-bottom: 0; }
+.toggle-tab {
+  padding: 10px 24px; background: var(--slate-200); border: none;
+  cursor: pointer; font-size: 13px; font-weight: 600;
+  color: var(--slate-600); transition: all 0.2s;
+}
+.toggle-tab:first-child { border-radius: 8px 0 0 0; }
+.toggle-tab:last-child { border-radius: 0 8px 0 0; }
+.toggle-tab.active { background: #fff; color: var(--blue-600); }
+.toggle-content { display: none; padding: 20px; background: #fff; border-radius: 0 0 8px 8px; border: 1px solid var(--slate-200); border-top: none; }
+.toggle-content.active { display: block; }
+
+/* ===================================================================
+   SCORING CALCULATOR
+   =================================================================== */
+.scoring-calc { background: #fff; border-radius: 12px; border: 1px solid var(--slate-200); overflow: hidden; margin: 24px 0; }
+.scoring-header { padding: 16px 20px; background: var(--slate-900); color: #fff; font-weight: 600; font-size: 14px; }
+.scoring-body { padding: 20px; }
+.scoring-step { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--slate-100); opacity: 0.3; transition: opacity 0.3s; font-size: 14px; }
+.scoring-step.active { opacity: 1; }
+.scoring-step .feature { flex: 1; }
+.scoring-step .weight { width: 80px; text-align: right; font-family: var(--font-mono); font-weight: 700; color: var(--blue-600); }
+.scoring-total { display: flex; justify-content: space-between; padding: 12px 0; font-weight: 700; font-size: 16px; border-top: 2px solid var(--slate-300); margin-top: 8px; }
+.scoring-total .value { font-family: var(--font-mono); color: var(--blue-600); }
+.scoring-controls { text-align: center; padding: 16px; }
+.scoring-controls button { padding: 8px 24px; background: var(--blue-500); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 13px; }
+.scoring-controls button:hover { background: var(--blue-600); }
+.scoring-controls button:disabled { background: var(--slate-300); cursor: default; }
+
+/* ===================================================================
+   PATIENT FLOW SIMULATION
+   =================================================================== */
+.patient-flow { background: #fff; border-radius: 12px; border: 1px solid var(--slate-200); overflow: hidden; margin: 24px 0; }
+.pf-header { padding: 16px 20px; background: var(--slate-900); color: #fff; display: flex; justify-content: space-between; align-items: center; }
+.pf-header h4 { font-size: 14px; margin: 0; color: #fff; }
+.pf-step-indicator { font-size: 12px; color: var(--slate-400); }
+.pf-body { padding: 24px; min-height: 300px; }
+.pf-step { display: none; }
+.pf-step.active { display: block; animation: fadeIn 0.4s ease; }
+.pf-step-title { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+.pf-step-layer { font-size: 11px; color: var(--blue-500); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+.pf-data { background: var(--slate-800); color: #e2e8f0; padding: 16px; border-radius: 8px; font-family: var(--font-mono); font-size: 12px; margin: 12px 0; line-height: 1.6; white-space: pre-wrap; }
+.pf-note { background: var(--blue-100); padding: 12px 16px; border-radius: 8px; font-size: 13px; color: var(--slate-700); margin: 12px 0; }
+.pf-guardrail { background: var(--green-50); border-left: 3px solid var(--green-500); padding: 10px 14px; border-radius: 0 8px 8px 0; font-size: 12px; margin: 12px 0; color: var(--slate-700); }
+.pf-controls { padding: 16px 20px; border-top: 1px solid var(--slate-200); display: flex; justify-content: space-between; }
+.pf-btn {
+  padding: 8px 20px; border: none; border-radius: 6px;
+  font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.2s;
+}
+.pf-btn-next { background: var(--blue-500); color: #fff; }
+.pf-btn-next:hover { background: var(--blue-600); }
+.pf-btn-prev { background: var(--slate-200); color: var(--slate-600); }
+.pf-btn-prev:hover { background: var(--slate-300); }
+.pf-btn:disabled { opacity: 0.4; cursor: default; }
+
+.result-card { background: var(--slate-50); border: 1px solid var(--slate-200); border-radius: 10px; padding: 16px; margin: 12px 0; }
+.result-card h5 { font-size: 14px; font-weight: 700; margin-bottom: 8px; }
+.acuity-badge { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.acuity-routine { background: var(--green-100); color: var(--green-600); }
+.acuity-priority { background: var(--amber-100); color: var(--amber-600); }
+.acuity-urgent { background: var(--red-100); color: var(--red-600); }
+
+/* ===================================================================
+   TIMELINE
+   =================================================================== */
+.timeline { position: relative; margin: 32px 0; padding-left: 32px; }
+.timeline::before { content: ''; position: absolute; left: 11px; top: 0; bottom: 0; width: 2px; background: var(--slate-200); }
+.timeline-item { position: relative; margin-bottom: 24px; }
+.timeline-dot {
+  position: absolute; left: -32px; top: 4px;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--blue-500); color: #fff;
+  font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+}
+.timeline-item h4 { font-size: 15px; margin-bottom: 4px; }
+.timeline-item p { font-size: 13px; margin-bottom: 0; }
+
+/* ===================================================================
+   HORIZONTAL JOURNEY
+   =================================================================== */
+.journey { display: flex; gap: 0; align-items: stretch; margin: 32px 0; overflow-x: auto; }
+.journey-step {
+  flex: 1; min-width: 120px; text-align: center; position: relative;
+  padding: 16px 10px;
+}
+.journey-step::after {
+  content: '\2192'; position: absolute; right: -8px; top: 50%;
+  transform: translateY(-50%); font-size: 20px; color: var(--slate-300);
+}
+.journey-step:last-child::after { display: none; }
+.journey-num { width: 28px; height: 28px; border-radius: 50%; background: var(--blue-500); color: #fff; font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 8px; }
+.journey-title { font-size: 12px; font-weight: 700; color: var(--slate-800); margin-bottom: 4px; }
+.journey-desc { font-size: 11px; color: var(--slate-500); }
+.journey-layer { font-size: 10px; color: var(--blue-500); font-weight: 600; margin-top: 6px; }
+
+/* ===================================================================
+   WEIGHT TABLE
+   =================================================================== */
+.weight-table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+.weight-table th { text-align: left; padding: 10px 12px; background: var(--slate-100); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--slate-500); border-bottom: 2px solid var(--slate-200); }
+.weight-table td { padding: 10px 12px; border-bottom: 1px solid var(--slate-100); }
+.weight-table .mono { font-family: var(--font-mono); font-weight: 700; color: var(--blue-600); }
+.weight-table tr.red td { background: var(--red-50); }
+
+/* ===================================================================
+   TECH STACK
+   =================================================================== */
+.tech-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin: 20px 0; }
+.tech-item { padding: 12px; background: #fff; border: 1px solid var(--slate-200); border-radius: 8px; text-align: center; font-size: 13px; font-weight: 600; }
+.tech-item span { display: block; font-size: 11px; color: var(--slate-500); font-weight: 400; margin-top: 2px; }
+
+/* ===================================================================
+   SATS COLOUR ROWS
+   =================================================================== */
+.sats-red { background: #fee2e2; }
+.sats-orange { background: #fff7ed; }
+.sats-yellow { background: #fefce8; }
+.sats-green { background: #f0fdf4; }
+
+/* ===================================================================
+   SOURCE BADGES
+   =================================================================== */
+.source-badge {
+  display: inline-block; padding: 3px 10px; border-radius: 12px;
+  font-size: 11px; font-weight: 600; margin: 2px 2px;
+}
+.source-stg { background: #dbeafe; color: #1e40af; }
+.source-hospital { background: #fef3c7; color: #92400e; }
+.source-paeds { background: #f3e8ff; color: #6b21a8; }
+.source-og { background: #fce7f3; color: #9d174d; }
+.source-maternal { background: #ffe4e6; color: #9f1239; }
+.source-sats { background: #dcfce7; color: #166534; }
+.source-rth { background: #e0f2fe; color: #075985; }
+
+/* ===================================================================
+   REFERRAL FLAG
+   =================================================================== */
+.refer-flag {
+  background: #fef2f2; border: 2px solid #ef4444;
+  padding: 12px 16px; border-radius: 8px; font-weight: 600;
+  font-size: 14px; margin: 12px 0;
+}
+
+/* ===================================================================
+   CARE LEVEL FLOW
+   =================================================================== */
+.care-level-flow { display: flex; flex-direction: column; gap: 0; margin: 24px 0; }
+.care-level-box {
+  padding: 20px 24px; border-radius: 0; border: 2px solid;
+  position: relative;
+}
+.care-level-box:first-child { border-radius: 12px 12px 0 0; }
+.care-level-box:last-child { border-radius: 0 0 12px 12px; }
+.care-level-arrow {
+  text-align: center; font-size: 22px; color: var(--slate-400);
+  padding: 4px 0; background: var(--slate-50);
+}
+
+/* ===================================================================
+   ANIMATIONS
+   =================================================================== */
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); } 50% { box-shadow: 0 0 0 8px rgba(239,68,68,0); } }
+.pulse-red { animation: pulse 2s infinite; }
+
+/* ===================================================================
+   CTA BUTTON
+   =================================================================== */
+.cta-btn {
+  display: inline-block; padding: 14px 36px;
+  background: var(--blue-500); color: #fff;
+  border-radius: 10px; font-size: 16px; font-weight: 700;
+  text-decoration: none; transition: all 0.2s;
+  box-shadow: var(--shadow-md);
+}
+.cta-btn:hover { background: var(--blue-600); transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+
+/* ===================================================================
+   RESPONSIVE
+   =================================================================== */
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .content { margin-left: 0; }
+  .section { padding: 40px 24px; }
+  h1 { font-size: 32px; }
+  .card-grid, .card-grid-3 { grid-template-columns: 1fr; }
+  .journey { flex-wrap: wrap; }
+  .stats-row { flex-direction: column; }
+  .flow-row { flex-wrap: wrap; justify-content: center; }
+}
+</style>
+</head>
+<body>
+
+<!-- ===================================================================
+     SIDEBAR
+     =================================================================== -->
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h2>CareMate</h2>
+    <p>Clinical AI Platform</p>
+  </div>
+  <ul class="progress-track">
+    <li class="act-label">The Problem</li>
+    <li data-section="access-gap" class="active"><span class="dot"></span> The Access Gap</li>
+    <li data-section="what-caremate-does"><span class="dot"></span> What CareMate Does</li>
+    <li class="act-label">The Platform</li>
+    <li data-section="three-agents"><span class="dot"></span> Three Agents</li>
+    <li data-section="clinical-safety"><span class="dot"></span> Clinical Safety</li>
+    <li data-section="validation"><span class="dot"></span> Validation Results</li>
+    <li class="act-label">Part 1: The Triage Agent</li>
+    <li data-section="knowledge-engine"><span class="dot"></span> Knowledge Engine</li>
+    <li data-section="triage-pipeline"><span class="dot"></span> Triage Pipeline</li>
+    <li data-section="patient-journey"><span class="dot"></span> Patient Journey</li>
+    <li class="act-label">Part 2: The Clinical Assistant</li>
+    <li data-section="clinical-assistant"><span class="dot"></span> .claude-plugin Architecture</li>
+    <li class="act-label">Part 3: The Encounter Agent</li>
+    <li data-section="encounter-docs"><span class="dot"></span> Documentation &amp; Care Plans</li>
+    <li data-section="opportunities"><span class="dot"></span> Opportunities Engine</li>
+    <li class="act-label">The Road Ahead</li>
+    <li data-section="scaling"><span class="dot"></span> Scaling Path</li>
+  </ul>
+</nav>
+
+<!-- ===================================================================
+     MAIN CONTENT
+     =================================================================== -->
+<div class="content">
+
+<!-- ===================================================================
+     SECTION 1: THE ACCESS GAP
+     =================================================================== -->
+<section class="section" id="access-gap">
+  <div class="section-label">The Clinical Case</div>
+  <h1>350 conditions.<br>747 pages.<br>One nurse.</h1>
+  <p class="lead" style="margin-top:24px; max-width:640px;">
+    South Africa has <strong>0.3 doctors per 1,000 people</strong> in the public sector &mdash; far below the WHO recommendation of 2.5. Over <strong>20 million South Africans</strong> fall into the "missing middle": too much income for free public care (days-long queues), too little for private care (R500&ndash;R900 per visit).
+  </p>
+  <p style="max-width:640px; color:var(--slate-500);">
+    Nurse-run clinics ARE the reality &mdash; nurses are making clinical decisions without adequate decision support. The SA Standard Treatment Guidelines (STG) &mdash; 747 pages covering 350 conditions &mdash; is the gold standard for primary healthcare. But it sits on a shelf: a nurse cannot realistically consult a printed manual during a 5-minute consultation. Digital alternatives exist &mdash; keyword-searchable drug formularies built for doctors &mdash; but formulary lookup ("what drug, what dose") is not clinical decision support ("what could this be, what should I rule out, when do I refer"). Nothing today gives nurses intelligent triage guidance at the point of care.
+  </p>
+
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-number" data-target="20" data-suffix="M+">0</div>
+      <div class="stat-label">Underserved South Africans</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="0.3" data-decimals="1">0</div>
+      <div class="stat-label">Doctors per 1,000 (public sector)</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-prefix="R" data-target="250">0</div>
+      <div class="stat-label">Target Consultation Fee</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="350">0</div>
+      <div class="stat-label">Conditions Digitised</div>
+    </div>
+  </div>
+
+  <div class="card-grid" style="margin-top:12px;">
+    <div class="card" style="border-left:4px solid var(--red-500);">
+      <h4>Public Healthcare Queues</h4>
+      <p>Patients face days-long queues and overwhelmed facilities. The system cannot meet demand with current staffing levels.</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--amber-500);">
+      <h4>Private Care Cost Barrier</h4>
+      <p>R500&ndash;R900 per consultation &mdash; impossible for the missing middle earning R2,000&ndash;R8,000 monthly.</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--blue-500);">
+      <h4>Nurse-Run Clinics Are Reality</h4>
+      <p>Nurses are already the frontline of primary care in SA &mdash; making clinical decisions without adequate decision support tools.</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--slate-500);">
+      <h4>STG Manual Sits on a Shelf</h4>
+      <p>747 pages of gold-standard guidelines. But looking up conditions during a 5-minute consultation is simply not feasible.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================
+     SECTION 2: WHAT CAREMATE DOES
+     =================================================================== -->
+<section class="section" id="what-caremate-does">
+  <div class="section-label">Clinical Decision Support</div>
+  <h2>What CareMate Does</h2>
+  <p class="lead" style="max-width:720px;">
+    Clinical decision support, NOT replacement of clinical judgement. We digitise the STG into an intelligent triage system accessible at point of care.
+  </p>
+
+  <div class="guardrail guardrail-info" style="margin-top:16px;">
+    <h4>The Key Distinction</h4>
+    <p>CareMate is NOT a drug formulary (keyword lookup for doctors). This is <strong>clinical reasoning for nurses</strong> &mdash; "what could this be, what should I rule out, when do I refer."</p>
+  </div>
+
+  <h3 style="margin-top:32px;">The Nurse Enters</h3>
+  <div class="flow-row">
+    <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-100);">Chief Complaint<br><small>Patient's own words</small></div>
+    <span class="flow-arrow">+</span>
+    <div class="flow-box" style="border-color:var(--green-500); background:var(--green-100);">Vitals<br><small>BP, Temp, SpO2, HR</small></div>
+    <span class="flow-arrow">+</span>
+    <div class="flow-box" style="border-color:var(--amber-500); background:var(--amber-100);">Demographics<br><small>Age, Sex</small></div>
+  </div>
+
+  <h3 style="margin-top:24px;">CareMate Returns</h3>
+  <div class="flow-row">
+    <div class="flow-box" style="border-color:var(--blue-500);">Ranked Differential<br><small>Top conditions</small></div>
+    <span class="flow-arrow">+</span>
+    <div class="flow-box" style="border-color:var(--red-500); background:var(--red-50);">Danger Signs<br><small>RED_FLAGs</small></div>
+    <span class="flow-arrow">+</span>
+    <div class="flow-box" style="border-color:var(--green-500);">Treatment<br><small>First-line STG</small></div>
+    <span class="flow-arrow">+</span>
+    <div class="flow-box" style="border-color:var(--amber-500);">Referral Criteria<br><small>When to escalate</small></div>
+  </div>
+
+  <h3 style="margin-top:40px;">Nurse Workflow Journey</h3>
+  <div class="journey">
+    <div class="journey-step">
+      <div class="journey-num">1</div>
+      <div class="journey-title">Patient Arrives</div>
+      <div class="journey-desc">Chief complaint in everyday language</div>
+      <div class="journey-layer">Symptom Extraction</div>
+    </div>
+    <div class="journey-step">
+      <div class="journey-num">2</div>
+      <div class="journey-title">Take Vitals</div>
+      <div class="journey-desc">BP, Temp, SpO2, HR, RR</div>
+      <div class="journey-layer">SATS/TEWS Scoring</div>
+    </div>
+    <div class="journey-step">
+      <div class="journey-num">3</div>
+      <div class="journey-title">History</div>
+      <div class="journey-desc">Onset, duration, meds</div>
+      <div class="journey-layer">Synonym Expansion</div>
+    </div>
+    <div class="journey-step">
+      <div class="journey-num">4</div>
+      <div class="journey-title">Differential</div>
+      <div class="journey-desc">"What could this be?"</div>
+      <div class="journey-layer">Scoring + Ranking</div>
+    </div>
+    <div class="journey-step">
+      <div class="journey-num">5</div>
+      <div class="journey-title">Check STG</div>
+      <div class="journey-desc">Treatment protocol</div>
+      <div class="journey-layer">Condition Detail</div>
+    </div>
+    <div class="journey-step">
+      <div class="journey-num">6</div>
+      <div class="journey-title">Act</div>
+      <div class="journey-desc">Prescribe or refer</div>
+      <div class="journey-layer">Safety Gate</div>
+    </div>
+  </div>
+
+  <h3 style="margin-top:40px;">Workflow Transformation</h3>
+  <table class="weight-table" style="font-size:13px;">
+    <thead>
+      <tr><th>Dimension</th><th>Traditional Model</th><th style="background:var(--blue-100); color:var(--blue-600);">With CareMate</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Clinical Decisions</strong></td><td>All on doctors</td><td style="background:var(--blue-100);">AI-assisted nurses handle triage</td></tr>
+      <tr><td><strong>Primary Care</strong></td><td>Doctor sees all patients</td><td style="background:var(--blue-100);">Nurses provide care with AI protocols</td></tr>
+      <tr><td><strong>Doctor Role</strong></td><td>Handles all cases</td><td style="background:var(--blue-100);">Complex cases &amp; escalations only</td></tr>
+      <tr><td><strong>Daily Capacity</strong></td><td>20&ndash;30 patients</td><td style="background:var(--blue-100);"><strong>160+ patients</strong></td></tr>
+      <tr><td><strong>Consultation Fee</strong></td><td>R500&ndash;R900</td><td style="background:var(--blue-100);"><strong>R250&ndash;R350</strong></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================================
+     SECTION 3: THREE AGENTS, ONE PLATFORM
+     =================================================================== -->
+<section class="section" id="three-agents">
+  <div class="section-label">Platform Architecture</div>
+  <h2>Three Agents, One Platform</h2>
+  <p class="lead" style="max-width:720px;">
+    CareMate is not a single tool &mdash; it is a clinical AI platform with three specialised agents that work together, all grounded in the same validated knowledge base.
+  </p>
+
+  <div class="card-grid-3" style="margin-top:24px;">
+    <div class="card" style="border-top:4px solid var(--green-500);">
+      <h4 style="color:var(--green-600);">Triage Agent</h4>
+      <p style="font-size:13px; font-weight:600; color:var(--slate-700); margin-bottom:8px;">"What could this be?"</p>
+      <p style="font-size:13px;">The nurse enters the patient&rsquo;s complaint and vitals. CareMate returns a ranked list of possible conditions from the STG, with danger signs, SATS acuity colour, and questions to help narrow the diagnosis. Like a senior colleague looking over your shoulder.</p>
+      <div style="font-size:12px; color:var(--slate-500); margin-top:8px; font-style:italic;">Results in under 10 seconds</div>
+    </div>
+    <div class="card" style="border-top:4px solid var(--purple-500);">
+      <h4 style="color:#7c3aed;">Clinical Assistant</h4>
+      <p style="font-size:13px; font-weight:600; color:var(--slate-700); margin-bottom:8px;">"What does the guideline say?"</p>
+      <p style="font-size:13px;">Ask any clinical question during the encounter &mdash; drug dosing, safety in pregnancy, when to refer, what investigations to order. The assistant looks up the answer in the STG and 7 other SA clinical sources, checks it against this patient&rsquo;s context, and cites its sources. Like having the guidelines open, but faster.</p>
+      <div style="font-size:12px; color:var(--slate-500); margin-top:8px; font-style:italic;">Knows this patient&rsquo;s context &mdash; age, diagnosis, vitals, medications</div>
+    </div>
+    <div class="card" style="border-top:4px solid var(--amber-500);">
+      <h4 style="color:var(--amber-600);">Encounter Agent</h4>
+      <p style="font-size:13px; font-weight:600; color:var(--slate-700); margin-bottom:8px;">"Document everything for me."</p>
+      <p style="font-size:13px;">Once the nurse confirms a diagnosis and prescribes treatment, CareMate generates the paperwork: a SOAP note for the clinical record, a care plan the patient can take home (in their own language, written simply), and a discharge summary for handover. Print-ready.</p>
+      <div style="font-size:12px; color:var(--slate-500); margin-top:8px; font-style:italic;">11 SA languages &bull; Grade 8 literacy &bull; 2&ndash;3 seconds</div>
+    </div>
+  </div>
+
+  <p style="font-size:14px; margin-top:16px; color:var(--slate-500);">Each agent is covered in depth below &mdash; Part 1 (Triage), Part 2 (Clinical Assistant), Part 3 (Encounter).</p>
+
+  <h3 style="margin-top:32px;">How They Connect</h3>
+  <div class="flow-row">
+    <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-100);">Clinical Knowledge<br>Engine<br><small>350 conditions, 12,150+ edges</small></div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--green-500); background:var(--green-100);">Triage<br>Agent</div>
+    <span class="flow-arrow">+</span>
+    <div class="flow-box" style="border-color:var(--purple-500); background:var(--purple-100);">Clinical<br>Assistant</div>
+    <span class="flow-arrow">+</span>
+    <div class="flow-box" style="border-color:var(--amber-500); background:var(--amber-100);">Encounter<br>Agent</div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--slate-500); background:var(--slate-100);">EHR<br><small>(future)</small></div>
+  </div>
+
+  <div class="stats-row" style="margin-top:24px;">
+    <div class="stat-card">
+      <div class="stat-number" data-target="9">0</div>
+      <div class="stat-label">Clinical Tools</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="25">0</div>
+      <div class="stat-label">Opportunity Rules</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="11">0</div>
+      <div class="stat-label">SA Languages</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="5" data-suffix="s">0</div>
+      <div class="stat-label">Local Triage Time</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================
+     SECTION 4: CLINICAL SAFETY — FIVE LAYERS
+     =================================================================== -->
+<section class="section" id="clinical-safety">
+  <div class="section-label">Clinical Safety</div>
+  <h2>Clinical Safety &mdash; Five Layers</h2>
+  <p>Patient safety in a clinical AI system requires defence in depth. No single layer can catch everything. CareMate uses five independent safety layers, each addressing a different failure mode.</p>
+
+  <h3 style="margin-top:24px;">Layer 1: SATS/TEWS Acuity</h3>
+  <p>The <strong>South African Triage Scale (SATS)</strong> &mdash; the nationally standardised system used across all SA emergency departments. 100% deterministic, no LLM involved.</p>
+
+  <table class="weight-table" style="font-size:13px;">
+    <thead><tr><th>TEWS Score</th><th>SATS Colour</th><th>Priority</th><th>Target Time</th></tr></thead>
+    <tbody>
+      <tr class="sats-red"><td class="mono" style="font-weight:700;">7+</td><td><span style="color:#dc2626; font-weight:700;">RED</span></td><td>Emergency</td><td>Immediate</td></tr>
+      <tr class="sats-orange"><td class="mono" style="font-weight:700;">5&ndash;6</td><td><span style="color:#ea580c; font-weight:700;">ORANGE</span></td><td>Very Urgent</td><td>&lt; 10 minutes</td></tr>
+      <tr class="sats-yellow"><td class="mono" style="font-weight:700;">3&ndash;4</td><td><span style="color:#ca8a04; font-weight:700;">YELLOW</span></td><td>Urgent</td><td>&lt; 60 minutes</td></tr>
+      <tr class="sats-green"><td class="mono" style="font-weight:700;">0&ndash;2</td><td><span style="color:var(--green-600); font-weight:700;">GREEN</span></td><td>Routine</td><td>&lt; 4 hours</td></tr>
+    </tbody>
+  </table>
+
+  <p style="margin-top:12px; font-size:13px;">TEWS scores 7 components (each 0&ndash;3 points): Heart Rate, Respiratory Rate, Systolic BP, Temperature, Consciousness (AVPU), Mobility, Trauma. Age-stratified thresholds for adult vs child. Clinical discriminators (e.g., active seizure, chest pain at rest) override TEWS and assign colour directly.</p>
+
+  <h3 style="margin-top:32px;">Layer 2: Care Level Boundaries</h3>
+  <div class="guardrail guardrail-info">
+    <h4>Tasleem's Rule</h4>
+    <p>Primary STG = treat at PHC. Hospital EML = identify + refer. Specialist = flag + refer. The nurse needs to <strong>recognise</strong> hospital-level conditions so they can refer appropriately, but treatment is not in their scope.</p>
+  </div>
+  <p style="font-size:13px;">15 referral-only conditions (9 O&G + 6 Hospital EML critical) with symptom edges + <code>referral_required=TRUE</code>. Triage FINDS them but says REFER, not TREAT.</p>
+
+  <h3 style="margin-top:32px;">Layer 3: Drug Safety</h3>
+  <div class="guardrail guardrail-danger">
+    <h4>Medication Safety Checks</h4>
+    <p>ACE inhibitors in pregnancy, NSAID + renal impairment, warfarin + NSAID interactions, CNS depressant stacking. Patient-specific, not generic warnings.</p>
+  </div>
+
+  <h3 style="margin-top:32px;">Layer 4: Safety Review Gate</h3>
+  <div class="guardrail guardrail-warning">
+    <h4>Independent LLM Review</h4>
+    <p>A separate LLM call reviews the complete triage output for missed dangers. Can only <strong>escalate</strong>, never downgrade. Speculation without evidence is capped at "priority". Runs in parallel with synthesis &mdash; zero added latency.</p>
+  </div>
+
+  <h3 style="margin-top:32px;">Layer 5: Clinical Opportunities Engine</h3>
+  <div class="guardrail guardrail-safe">
+    <h4>25 Deterministic Rules</h4>
+    <p>Proactive screening, diagnosis-triggered workups, vital sign incidentals, SDOH referrals, and medication safety alerts. Fires automatically based on patient data &mdash; no LLM, no hallucination risk.</p>
+  </div>
+</section>
+
+<!-- ===================================================================
+     SECTION 5: VALIDATION RESULTS
+     =================================================================== -->
+<section class="section" id="validation">
+  <div class="section-label">Clinical Validation</div>
+  <h2>Validation Results</h2>
+
+  <h3>Phase I: 30 Clinical Vignettes by Dr Tasleem Ras</h3>
+  <p>30 vignettes across 6 clinical domains (5 each), written by our clinical advisor with 20 years of SA public health experience. Run blind through CareMate &mdash; system knowledge only, no external input.</p>
+
+  <div class="stats-row">
+    <div class="stat-card" style="border:2px solid var(--green-500);">
+      <div class="stat-number" style="color:var(--green-600);" data-target="80" data-suffix="%">0</div>
+      <div class="stat-label">Top-1 Correct (24/30)</div>
+    </div>
+    <div class="stat-card" style="border:2px solid var(--blue-500);">
+      <div class="stat-number" style="color:var(--blue-600);" data-target="96" data-suffix="%">0</div>
+      <div class="stat-label">Adjusted (excluding KB gaps)</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="6">0</div>
+      <div class="stat-label">Clinical Domains Tested</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="0">0</div>
+      <div class="stat-label">Algorithm Failures</div>
+    </div>
+  </div>
+
+  <table class="weight-table" style="font-size:13px; margin-top:20px;">
+    <thead><tr><th>Domain</th><th>Top-1</th><th>Missed</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Pregnancy</strong></td><td class="mono">4/5</td><td>Foetal distress (not in DB at time)</td></tr>
+      <tr style="background:var(--green-50);"><td><strong>Under 5</strong></td><td class="mono" style="color:var(--green-600);">5/5</td><td>&mdash;</td></tr>
+      <tr><td><strong>Schoolgoing</strong></td><td class="mono">4/5</td><td>Learning difficulty (not in STG)</td></tr>
+      <tr><td><strong>Adolescent</strong></td><td class="mono">4/5</td><td>Hyperthyroidism (age filter issue)</td></tr>
+      <tr style="background:var(--green-50);"><td><strong>Adult Health</strong></td><td class="mono" style="color:var(--green-600);">5/5</td><td>&mdash;</td></tr>
+      <tr><td><strong>Geriatrics</strong></td><td class="mono">2&ndash;3/5</td><td>CKD (lab-only edges), Falls risk (not in STG)</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:32px;">Deep Test: 92/92 Conditions Found</h3>
+  <div class="stats-row">
+    <div class="stat-card" style="border:2px solid var(--green-500);">
+      <div class="stat-number" style="color:var(--green-600);" data-target="97.8" data-decimals="1" data-suffix="%">0</div>
+      <div class="stat-label">Top-5 Accuracy</div>
+    </div>
+    <div class="stat-card" style="border:2px solid var(--blue-500);">
+      <div class="stat-number" style="color:var(--blue-600);" data-target="92.4" data-decimals="1" data-suffix="%">0</div>
+      <div class="stat-label">Top-1 Accuracy</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="92">0</div>
+      <div class="stat-label">Test Cases</div>
+    </div>
+    <div class="stat-card" style="border:2px solid var(--green-500);">
+      <div class="stat-number" style="color:var(--green-600);" data-target="0">0</div>
+      <div class="stat-label">Misses</div>
+    </div>
+  </div>
+
+  <h3 style="margin-top:32px;">Fixes Applied After Phase I</h3>
+  <div class="timeline">
+    <div class="timeline-item">
+      <div class="timeline-dot" style="background:var(--green-500);">1</div>
+      <h4>Hyperthyroidism age limit extended</h4>
+      <p>Was 0&ndash;18 (children only). Extended to adult population.</p>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-dot" style="background:var(--green-500);">2</div>
+      <h4>CKD clinical symptom edges added</h4>
+      <p>Added fatigue, pruritus, nocturia, peripheral oedema (was lab-only before).</p>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-dot" style="background:var(--green-500);">3</div>
+      <h4>Foetal distress added as referral-only</h4>
+      <p>Added with symptom edges + <code>referral_required=TRUE</code>.</p>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-dot" style="background:var(--green-500);">4</div>
+      <h4>Postmenopausal bleeding added</h4>
+      <p>Added as referral-only condition with appropriate symptom edges.</p>
+    </div>
+  </div>
+
+  <div class="guardrail guardrail-safe">
+    <h4>Key Finding</h4>
+    <p>Every miss was a knowledge gap, not an algorithm failure &mdash; the engine works, we just need to teach it more. When the condition exists in the knowledge base, CareMate finds it.</p>
+  </div>
+</section>
+
+<!-- ===================================================================
+     PART 1: THE TRIAGE AGENT — KNOWLEDGE ENGINE
+     =================================================================== -->
+<section class="section" id="knowledge-engine">
+  <div class="section-label">Part 1: The Triage Agent</div>
+  <h2>The Triage Agent</h2>
+  <p class="lead" style="max-width:720px;">
+    A patient arrives at the clinic. The nurse hears their complaint, takes their vitals, and needs to work out what&rsquo;s wrong. In a busy SA primary care facility seeing 40&ndash;60 patients a day, this decision often happens under pressure, without a doctor on site, and with limited access to reference material.
+  </p>
+  <p style="font-size:14px; max-width:720px; margin-top:12px;">
+    The Triage Agent is CareMate&rsquo;s answer to this moment. The nurse types the patient&rsquo;s complaint, enters vitals, and within seconds receives a ranked differential diagnosis grounded entirely in the SA Standard Treatment Guidelines &mdash; complete with SATS acuity colour, danger signs to watch for, and targeted questions to narrow the diagnosis.
+  </p>
+
+  <div class="guardrail guardrail-info" style="margin-top:20px; margin-bottom:24px;">
+    <h4>Why We Built It This Way</h4>
+    <p>Most AI systems generate their answers from a language model &mdash; which means the answer can change unpredictably, and you can&rsquo;t verify what knowledge it used. We took a different approach: we built a <strong>clinical knowledge graph</strong> &mdash; every condition, every symptom relationship, every danger sign extracted from the STG and stored as structured, validated data. The AI helps with understanding the nurse&rsquo;s language, but the clinical matching, scoring, and safety checks are deterministic. The same inputs always produce the same outputs. This is what makes it auditable, testable, and safe.</p>
+  </div>
+
+  <h3>The Clinical Knowledge Engine</h3>
+  <p style="font-size:14px; max-width:720px;">Underneath the Triage Agent sits the knowledge engine &mdash; the structured clinical knowledge that powers every triage decision:</p>
+
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-number" data-target="350">0</div>
+      <div class="stat-label">Conditions</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="12150" data-suffix="+">0</div>
+      <div class="stat-label">Clinical Edges</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="1532">0</div>
+      <div class="stat-label">Knowledge Chunks</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="7">0</div>
+      <div class="stat-label">Clinical Sources</div>
+    </div>
+  </div>
+
+  <h3 style="margin-top:32px;">Three Layers Power the Triage Agent</h3>
+  <div style="display:flex; flex-direction:column; gap:0; margin:24px 0;">
+    <div style="padding:20px 24px; background:var(--blue-100); border:2px solid var(--blue-500); border-radius:12px 12px 0 0; position:relative;">
+      <strong style="font-size:15px;">Layer 3: Runtime Services</strong>
+      <p style="font-size:13px; margin:8px 0 0;">Synonym expansion, multi-layer scoring, SATS/TEWS acuity, safety review. All deterministic &mdash; no LLM involved. This is where clinical decisions happen.</p>
+      <div style="position:absolute; right:12px; top:14px; font-size:10px; font-weight:700; color:var(--blue-600); background:#fff; padding:2px 8px; border-radius:4px; border:1px solid var(--blue-500);">THE MOAT</div>
+    </div>
+    <div style="padding:20px 24px; background:var(--blue-100); border:2px solid var(--blue-500); border-top:0;">
+      <strong style="font-size:15px;">Layer 2: Knowledge Store</strong>
+      <p style="font-size:13px; margin:8px 0 0;">350 conditions with 12,150+ typed edges (diagnostic_feature, presenting_feature, associated_feature, RED_FLAG). Every edge has a type, weight, and STG citation.</p>
+    </div>
+    <div style="padding:20px 24px; background:var(--blue-100); border:2px solid var(--blue-500); border-top:0; border-radius:0 0 12px 12px;">
+      <strong style="font-size:15px;">Layer 1: Ingestion Pipeline</strong>
+      <p style="font-size:13px; margin:8px 0 0;">pdfplumber + Docling table extraction + LLM-assisted structuring. 747 pages of STG &rarr; structured JSON &rarr; PostgreSQL knowledge graph. Run once, validated thoroughly.</p>
+    </div>
+  </div>
+
+  <div class="guardrail guardrail-info">
+    <h4>Why the Moat Matters</h4>
+    <p>These three layers are domain engineering, not code &mdash; validated clinical relationships, SA-specific prevalence tiers, SATS scoring tables. Anyone can call an LLM. Nobody else has a 350-condition SA clinical knowledge graph with 12,150+ typed edges, validated at 92/92 deep test accuracy.</p>
+  </div>
+
+  <h3 style="margin-top:32px;">LLM Calls Are Scaffolding</h3>
+  <div class="card-grid">
+    <div class="card" style="border-left:4px solid var(--amber-500);">
+      <h4>Today (LLM-assisted)</h4>
+      <p style="font-size:13px;">Haiku for symptom extraction + re-ranking. 2 LLM calls per triage. ~$0.01/triage. Everything between extraction and synthesis is deterministic.</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--green-500);">
+      <h4>At Scale (deterministic)</h4>
+      <p style="font-size:13px;">Fine-tuned NER for extraction. Trained ranker for scoring. Rule-based safety. Zero LLM calls. ~$0.0005/triage. Validation data = training data.</p>
+    </div>
+  </div>
+
+  <h3 style="margin-top:32px;">7 Knowledge Sources</h3>
+  <table class="weight-table" style="font-size:13px; margin-top:12px;">
+    <thead><tr><th>Source</th><th>Scope</th><th>Used By</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="source-badge source-stg">STG Primary Care</span> <span style="font-size:11px; color:var(--slate-500);">(22 chapters)</span></td>
+        <td>Primary care treatment protocols &mdash; the core</td>
+        <td style="font-size:12px;">Triage + Clinical Assistant</td>
+      </tr>
+      <tr>
+        <td><span class="source-badge source-hospital">Hospital Level EML</span> <span style="font-size:11px; color:var(--slate-500);">(26 chapters)</span></td>
+        <td>Hospital-level &mdash; referral context only</td>
+        <td style="font-size:12px;">Clinical Assistant</td>
+      </tr>
+      <tr>
+        <td><span class="source-badge source-paeds">Paediatric EML</span> <span style="font-size:11px; color:var(--slate-500);">(24 chapters)</span></td>
+        <td>Child-specific protocols and dosing</td>
+        <td style="font-size:12px;">Clinical Assistant</td>
+      </tr>
+      <tr>
+        <td><span class="source-badge source-og">O&G / SASOG</span> <span style="font-size:11px; color:var(--slate-500);">(2 files)</span></td>
+        <td>Obstetrics &amp; gynaecology</td>
+        <td style="font-size:12px;">Clinical Assistant</td>
+      </tr>
+      <tr>
+        <td><span class="source-badge source-maternal">Maternal &amp; Perinatal</span> <span style="font-size:11px; color:var(--slate-500);">(20 files)</span></td>
+        <td>Pregnancy, labour, postnatal</td>
+        <td style="font-size:12px;">Clinical Assistant</td>
+      </tr>
+      <tr>
+        <td><span class="source-badge source-sats">SATS Triage Manual</span> <span style="font-size:11px; color:var(--slate-500);">(3 files)</span></td>
+        <td>Triage scoring, clinical discriminators</td>
+        <td style="font-size:12px;">Triage + Clinical Assistant</td>
+      </tr>
+      <tr>
+        <td><span class="source-badge source-rth">Road to Health</span> <span style="font-size:11px; color:var(--slate-500);">(1 file)</span></td>
+        <td>Under-5 development milestones</td>
+        <td style="font-size:12px;">Clinical Assistant</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="guardrail guardrail-safe" style="margin-top:16px;">
+    <h4>3 MB Knowledge Graph</h4>
+    <p>Fits in process memory. At scale: in-memory graph, no database for triage, edge deployment on clinic tablets. The triage agent can run offline with just this graph.</p>
+  </div>
+</section>
+
+<!-- ===================================================================
+     TRIAGE PIPELINE — HOW SCORING WORKS
+     =================================================================== -->
+<section class="section" id="triage-pipeline">
+  <div class="section-label">The Triage Engine</div>
+  <h2>Triage Pipeline &mdash; How Scoring Works</h2>
+  <p>Only <strong>2 LLM calls</strong> in the entire pipeline. Everything else is database queries and deterministic scoring.</p>
+
+  <h3 style="margin-top:24px;">6-Step Pipeline</h3>
+  <div class="flow-row">
+    <div class="flow-box" style="border-color:var(--purple-500); background:var(--purple-100);">Extract<br><small>LLM #1</small></div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-100);">Expand<br><small>DB only</small></div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-100);">Search<br><small>DB only</small></div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-100);">Score<br><small>DB only</small></div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--red-500); background:var(--red-50);">Safety<br><small>Deterministic</small></div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--purple-500); background:var(--purple-100);">Synthesise<br><small>LLM #2</small></div>
+  </div>
+  <p style="font-size:12px; color:var(--slate-500); margin-top:8px;">LLM #2 runs in parallel with safety review. SATS acuity is computed deterministically from vitals. Condition symptoms generated from DB clinical entities (no LLM).</p>
+
+  <h3 style="margin-top:32px;">Interactive: Scoring "fever + stiff neck"</h3>
+  <p style="font-size:14px;">Step through to see how Meningitis scores higher than Common Cold:</p>
+
+  <div class="scoring-calc" id="scoring-calc">
+    <div class="scoring-header">Meningitis (STG 10.1) vs Common Cold (STG 19.2)</div>
+    <div class="scoring-body">
+      <h4 style="margin-bottom:12px;">Meningitis</h4>
+      <div class="scoring-step" data-score="0.18"><span class="feature">"nuchal rigidity" &rarr; <strong>diagnostic_feature</strong></span><span class="weight">+0.18</span></div>
+      <div class="scoring-step" data-score="0.12"><span class="feature">"fever" &rarr; <strong>presenting_feature</strong></span><span class="weight">+0.12</span></div>
+      <div class="scoring-step" data-score="0.10"><span class="feature">"altered consciousness" &rarr; <strong>RED_FLAG bonus</strong></span><span class="weight">+0.10</span></div>
+      <div class="scoring-step" data-score="x2"><span class="feature">Multi-group boost: 2 symptoms &rarr; <strong>&times;2</strong></span><span class="weight">&times;2</span></div>
+      <div class="scoring-step" data-score="x1"><span class="feature">SA prevalence: not in high tier</span><span class="weight">&times;1.0</span></div>
+      <div class="scoring-total"><span>Meningitis Final Score</span><span class="value" id="meningitis-total">0.00</span></div>
+
+      <h4 style="margin:16px 0 12px;">Common Cold</h4>
+      <div class="scoring-step" data-score="0.12"><span class="feature">"fever" &rarr; <strong>presenting_feature</strong></span><span class="weight">+0.12</span></div>
+      <div class="scoring-step" data-score="x1"><span class="feature">Multi-group boost: 1 group &rarr; <strong>&times;1</strong></span><span class="weight">&times;1</span></div>
+      <div class="scoring-step" data-score="1.25"><span class="feature">SA prevalence: <strong>high tier</strong></span><span class="weight">&times;1.25</span></div>
+      <div class="scoring-total"><span>Common Cold Final Score</span><span class="value" id="cold-total">0.00</span></div>
+    </div>
+    <div class="scoring-controls">
+      <button id="scoring-next-btn" onclick="advanceScoring()">Step Through Scoring &rarr;</button>
+      <button id="scoring-reset-btn" onclick="resetScoring()" style="background:var(--slate-400); margin-left:8px; display:none;">Reset</button>
+    </div>
+  </div>
+
+  <h3 style="margin-top:24px;">Scoring Feature Weights</h3>
+  <table class="weight-table" style="font-size:13px;">
+    <thead><tr><th>Feature Type</th><th>Weight</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>diagnostic_feature</td><td class="mono">0.18</td><td>Pathognomonic &mdash; strongly differentiates this condition</td></tr>
+      <tr><td>presenting_feature</td><td class="mono">0.12</td><td>Common presentation &mdash; expected complaint</td></tr>
+      <tr><td>associated_feature</td><td class="mono">0.08</td><td>May be present &mdash; supports but doesn't confirm</td></tr>
+      <tr class="red"><td>RED_FLAG bonus</td><td class="mono">+0.10</td><td>Danger sign &mdash; triggers escalation review</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="margin-top:24px;">SA Prevalence Tiers (28 conditions)</h3>
+  <div class="card-grid">
+    <div class="card" style="border-left:4px solid var(--red-500); padding:16px;">
+      <h4 style="font-size:14px;">High Prevalence (1.5x)</h4>
+      <p style="font-size:12px;">TB, HIV-related conditions</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--amber-500); padding:16px;">
+      <h4 style="font-size:14px;">Above Average (1.4x)</h4>
+      <p style="font-size:12px;">Hypertension, Diabetes Type 2</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--blue-500); padding:16px;">
+      <h4 style="font-size:14px;">Moderate (1.25x)</h4>
+      <p style="font-size:12px;">Common cold, UTI, Gastroenteritis</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--slate-400); padding:16px;">
+      <h4 style="font-size:14px;">Non-Disease Penalty (0.5x)</h4>
+      <p style="font-size:12px;">Immunisation chapters, symptom-only entries</p>
+    </div>
+  </div>
+
+  <div class="guardrail guardrail-danger" style="margin-top:16px;">
+    <p class="label label-risk">Why multi-group boost matters</p>
+    <p>Without it, Common Cold (1.25x prevalence) at 0.15 could outrank Meningitis at 0.12 for "fever + stiff neck". Multi-group boost rewards conditions matching MORE distinct complaints. Result: Meningitis 0.80 >> Common Cold 0.15. A potentially fatal miss prevented.</p>
+  </div>
+
+  <div class="stats-row" style="margin-top:24px;">
+    <div class="stat-card">
+      <div class="stat-number" data-target="2">0</div>
+      <div class="stat-label">LLM Calls per Triage</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="5" data-suffix="s">0</div>
+      <div class="stat-label">Local Latency</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="10" data-suffix="s">0</div>
+      <div class="stat-label">Production Latency</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-prefix="$" data-target="0.01" data-decimals="2">0</div>
+      <div class="stat-label">Cost per Triage</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================
+     PATIENT JOURNEY — INTERACTIVE WALKTHROUGH
+     =================================================================== -->
+<section class="section" id="patient-journey">
+  <div class="section-label">Interactive Walkthrough</div>
+  <h2>Patient Journey</h2>
+  <p>Trace a real patient through the system, step by step. This case demonstrates referral-only conditions, care level boundaries, and multi-language output.</p>
+
+  <div class="patient-flow" id="patient-flow-sim">
+    <div class="pf-header">
+      <h4>Patient Flow Simulation</h4>
+      <span class="pf-step-indicator">Step <span id="pf-current">1</span> of 9</span>
+    </div>
+    <div class="pf-body">
+
+      <!-- Step 1 -->
+      <div class="pf-step active" id="pf-step-1">
+        <div class="pf-step-title">Patient Arrives</div>
+        <div class="pf-step-layer">Input</div>
+        <div class="result-card">
+          <h5>Nurse enters complaint:</h5>
+          <p style="font-size:16px; font-style:italic; margin:8px 0;">"My baby hasn't been moving much today, I'm 34 weeks pregnant"</p>
+          <p style="font-size:13px; margin:0;"><strong>Vitals:</strong> BP 130/85, HR 88, Temp 37.0&deg;C, SpO2 98%</p>
+        </div>
+        <div class="pf-note">This is a potentially serious complaint. The system needs to identify that this could be foetal distress &mdash; a hospital-level emergency &mdash; and flag it for immediate referral.</div>
+      </div>
+
+      <!-- Step 2 -->
+      <div class="pf-step" id="pf-step-2">
+        <div class="pf-step-title">Vitals Recorded</div>
+        <div class="pf-step-layer">SATS/TEWS Deterministic Scoring</div>
+        <div class="pf-data"><span class="json-key">TEWS Component Scores:</span>
+  Heart Rate 88      &rarr; 0 points (51-100 normal)
+  Systolic BP 130    &rarr; 2 points (&gt;129 elevated)
+  Temperature 37.0   &rarr; 0 points (35.0-38.4 normal)
+  SpO2 98%           &rarr; 0 points (normal)
+
+<span class="json-key">Total TEWS:</span> 2
+<span class="json-key">SATS Colour:</span> <span class="json-str">GREEN</span> (Routine, TEWS 0-2)
+
+<span class="json-key">Note:</span> BP is mildly elevated (130/85) in a pregnant patient.
+  Clinical discriminators will be checked against symptoms.</div>
+        <div class="pf-guardrail">Guardrail: TEWS scoring is 100% deterministic &mdash; no LLM involved. Each vital is scored against age-stratified tables from the SATS manual.</div>
+      </div>
+
+      <!-- Step 3 -->
+      <div class="pf-step" id="pf-step-3">
+        <div class="pf-step-title">Symptom Extraction</div>
+        <div class="pf-step-layer">LLM: Claude Haiku (temperature=0)</div>
+        <div class="pf-data"><span class="json-key">Input:</span>  "My baby hasn't been moving much today, I'm 34 weeks pregnant"
+
+<span class="json-key">Output:</span> ["decreased fetal movement", "34 weeks gestation"]
+
+<span class="json-key">Context:</span> { patient_is_pregnant: true, gestational_age: 34 }</div>
+        <div class="pf-guardrail">Guardrail: Temperature=0 ensures deterministic extraction. Only symptoms the patient actually described are extracted &mdash; never inferred.</div>
+      </div>
+
+      <!-- Step 4 -->
+      <div class="pf-step" id="pf-step-4">
+        <div class="pf-step-title">Synonym Expansion</div>
+        <div class="pf-step-layer">Database Lookup (No LLM)</div>
+        <div class="pf-data"><span class="json-key">Original:</span>    ["decreased fetal movement"]
+
+<span class="json-key">+ Synonyms:</span>  "reduced fetal movements", "baby not moving",
+              "diminished fetal activity", "absent fetal movements"
+
+<span class="json-key">Expanded:</span>   6 terms total (from 1 original group)</div>
+        <div class="pf-guardrail">Guardrail: Synonym expansion bridges patient language ("baby hasn't been moving") to clinical terminology ("decreased fetal movement", "reduced fetal movements").</div>
+      </div>
+
+      <!-- Step 5 -->
+      <div class="pf-step" id="pf-step-5">
+        <div class="pf-step-title">Knowledge Graph Search</div>
+        <div class="pf-step-layer">Clinical Relationship Index + Scoring</div>
+        <div class="pf-data"><span class="json-key">Top Match: Foetal Distress</span>
+  source_tag: eml_hospital_za
+  care_setting: hospital
+  referral_required: <span class="json-bool">TRUE</span>
+
+<span class="json-key">Symptom Matches:</span>
+  "decreased fetal movement" &rarr; diagnostic_feature  <span class="json-num">+0.18</span>
+  "reduced fetal movements"  &rarr; presenting_feature  <span class="json-num">+0.12</span>
+
+<span class="json-key">Ranked #1</span> in differential</div>
+        <div class="pf-guardrail">Guardrail: The system found Foetal Distress through symptom edges, not condition name matching. It correctly identified a referral-only condition.</div>
+      </div>
+
+      <!-- Step 6 -->
+      <div class="pf-step" id="pf-step-6">
+        <div class="pf-step-title">Scoring &amp; Referral Flag</div>
+        <div class="pf-step-layer">Deterministic Scoring + Care Level Check</div>
+        <div class="pf-data"><span class="json-key">Foetal Distress scored #1</span>
+  source_tag: eml_hospital_za
+  referral_required: TRUE
+
+<span class="json-key">CARE LEVEL CHECK:</span>
+  This condition has referral_required = TRUE
+  &rarr; REFER flag activated
+  &rarr; Treatment protocols NOT shown (beyond PHC scope)
+  &rarr; Referral guidance shown instead
+
+<span class="json-key">Mildly elevated BP (130/85) in pregnancy:</span>
+  Vitals safety nudge: "Incidental elevated BP in pregnant patient.
+  Consider pre-eclampsia screening."</div>
+      </div>
+
+      <!-- Step 7 -->
+      <div class="pf-step" id="pf-step-7">
+        <div class="pf-step-title">Safety Review</div>
+        <div class="pf-step-layer">Independent LLM Review (Parallel)</div>
+        <div class="pf-data"><span class="json-key">Safety reviewer input:</span>
+  Complaint: "baby not moving, 34 weeks pregnant"
+  Acuity: GREEN (TEWS 2)
+  Top condition: Foetal Distress (referral-only)
+  BP: 130/85 (elevated in pregnancy)
+
+<span class="json-key">Safety reviewer output:</span>
+  {
+    <span class="json-key">"safe"</span>: <span class="json-bool">false</span>,
+    <span class="json-key">"escalation"</span>: <span class="json-str">"ORANGE"</span>,
+    <span class="json-key">"reason"</span>: <span class="json-str">"Decreased fetal movement + elevated BP in 3rd trimester requires urgent obstetric assessment"</span>
+  }
+
+<span class="json-key">Acuity escalated:</span> GREEN &rarr; ORANGE (Very Urgent)</div>
+        <div class="pf-guardrail">Guardrail: Safety review can only ESCALATE, never downgrade. Escalation is evidence-based &mdash; specific symptoms cited (decreased fetal movement + elevated BP).</div>
+      </div>
+
+      <!-- Step 8 -->
+      <div class="pf-step" id="pf-step-8">
+        <div class="pf-step-title">Result: REFER</div>
+        <div class="pf-step-layer">Output to Nurse</div>
+        <div class="result-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h5 style="margin:0;">Triage Result</h5>
+            <span class="acuity-badge acuity-urgent">ORANGE &mdash; Very Urgent</span>
+          </div>
+          <div class="refer-flag">REFER &mdash; Foetal Distress identified. This condition requires hospital-level care. Refer urgently to nearest facility with obstetric services.</div>
+          <p style="font-size:13px; margin-top:12px;"><strong>Key Findings:</strong></p>
+          <ul style="font-size:13px; padding-left:20px; margin:0;">
+            <li>Decreased fetal movement at 34 weeks gestation</li>
+            <li>BP 130/85 &mdash; mildly elevated for pregnant patient</li>
+            <li>Acuity escalated to ORANGE (Very Urgent): target &lt;10 minutes</li>
+          </ul>
+          <p style="font-size:13px; margin-top:12px;"><strong>While waiting for referral:</strong> Left lateral position, monitor vitals, arrange transport</p>
+        </div>
+      </div>
+
+      <!-- Step 9 -->
+      <div class="pf-step" id="pf-step-9">
+        <div class="pf-step-title">Care Plan in Patient's Language</div>
+        <div class="pf-step-layer">Encounter Agent &mdash; isiZulu (Grade 8 literacy)</div>
+        <div class="toggle-panel">
+          <div class="toggle-tabs">
+            <button class="toggle-tab active" data-target="lang-zu">isiZulu</button>
+            <button class="toggle-tab" data-target="lang-en">English</button>
+          </div>
+          <div class="toggle-content active" id="lang-zu">
+            <div style="font-size:14px; line-height:1.8;">
+              <p style="font-weight:700; font-size:16px;">Uhlelo Lokunakekelwa Kwakho</p>
+              <p><strong>Okutholakele:</strong> Ingane yakho ayinyakazi kahle esiswini. Lokhu kudinga ukuhlolwa esibhedlela ngokushesha.</p>
+              <p><strong>Okumele ukwenze:</strong></p>
+              <ul style="padding-left:20px;">
+                <li>Lala ngasohlangothini lwakho lwangakwesokunxele</li>
+                <li>Ungadli izinto ezinomshanguzo</li>
+                <li>Hamba esibhedlela ngokushesha</li>
+              </ul>
+              <p style="color:var(--red-600); font-weight:600;">Hamba esibhedlela MANJE uma ingane iyeka ukushukuma ngokuphelele.</p>
+            </div>
+          </div>
+          <div class="toggle-content" id="lang-en">
+            <div style="font-size:14px; line-height:1.8;">
+              <p style="font-weight:700; font-size:16px;">Your Care Plan</p>
+              <p><strong>What we found:</strong> Your baby is not moving enough in your womb. This needs to be checked at the hospital urgently.</p>
+              <p><strong>What you must do:</strong></p>
+              <ul style="padding-left:20px;">
+                <li>Lie on your left side</li>
+                <li>Do not take any herbal medicines</li>
+                <li>Go to the hospital as soon as possible</li>
+              </ul>
+              <p style="color:var(--red-600); font-weight:600;">Go to the hospital NOW if the baby stops moving completely.</p>
+            </div>
+          </div>
+        </div>
+        <div class="pf-guardrail">This care plan is generated at Grade 8 literacy level in the patient's preferred language. Print-ready with clinician and patient signature lines. Supports all 11 SA official languages.</div>
+      </div>
+
+    </div>
+    <div class="pf-controls">
+      <button class="pf-btn pf-btn-prev" id="pf-prev" disabled onclick="pfPrev()">&#8592; Previous</button>
+      <button class="pf-btn pf-btn-next" id="pf-next" onclick="pfNext()">Continue &#8594;</button>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================
+     PART 2: THE CLINICAL ASSISTANT — .claude-plugin ARCHITECTURE
+     =================================================================== -->
+<section class="section" id="clinical-assistant">
+  <div class="section-label">Part 2: The Clinical Assistant</div>
+  <h2>The Clinical Assistant</h2>
+  <p class="lead" style="max-width:720px;">
+    Mid-encounter, a nurse has questions. <em>Can I give this drug to a pregnant patient? What dose of amoxicillin for a 4-year-old? The patient&rsquo;s eGFR is 38 &mdash; should I refer?</em> Today, the answer lives somewhere in a 747-page guideline book, if the nurse has time to find it.
+  </p>
+  <p style="font-size:14px; max-width:720px; margin-top:12px;">
+    The Clinical Assistant is an AI agent the nurse can ask these questions to during the encounter. It searches the SA Standard Treatment Guidelines and 6 other validated clinical sources, checks the answer against <em>this specific patient&rsquo;s</em> context &mdash; their age, diagnosis, vitals, current medications &mdash; and responds with a cited, sourced answer. It remembers the conversation, so the nurse can ask follow-up questions naturally.
+  </p>
+
+  <div class="guardrail guardrail-info" style="margin-top:20px; margin-bottom:24px;">
+    <h4>Why It&rsquo;s an Autonomous Agent, Not a Search Engine</h4>
+    <p>A search engine returns pages. An agent <em>reasons</em>. When a nurse asks &ldquo;Can I give ibuprofen to this patient?&rdquo;, the Clinical Assistant doesn&rsquo;t just look up ibuprofen &mdash; it checks whether the patient is pregnant (contraindicated), whether they&rsquo;re on an ACE inhibitor (dangerous interaction), whether they have renal impairment (dose adjustment needed), and if the drug is unsafe, it proactively finds an alternative. It chains multiple steps together autonomously, just as an experienced colleague would think through the problem. This is the difference between a tool that retrieves information and an agent that reasons about it.</p>
+  </div>
+
+  <h3 style="margin-top:24px;">Agent Architecture</h3>
+  <p style="font-size:14px;">The Clinical Assistant is built as a true AI agent with five core components &mdash; the same architecture used in modern autonomous AI systems, adapted for clinical safety:</p>
+
+  <div class="card-grid-3" style="margin-top:16px;">
+    <div class="card" style="border-top:4px solid var(--blue-500);">
+      <h4 style="color:var(--blue-600);">Knowledge</h4>
+      <p style="font-size:13px; font-weight:600; margin-bottom:8px;">Two layers: structured DB + 98 markdown files</p>
+      <p style="font-size:12px;"><strong>Structured DB:</strong> 335 conditions, 12,150 clinical edges, 1,532 knowledge chunks &mdash; queryable, scored, validated.<br><strong>Markdown KB:</strong> 98 files across 7 SA clinical sources &mdash; readable, editable, version-controlled. Not a black box &mdash; clinicians can open any file and see exactly what the agent knows.</p>
+    </div>
+    <div class="card" style="border-top:4px solid var(--purple-500);">
+      <h4 style="color:#7c3aed;">Tools (9)</h4>
+      <p style="font-size:13px; font-weight:600; margin-bottom:8px;">Atomic capabilities the agent can invoke</p>
+      <p style="font-size:12px;">Each tool is a discrete function: search guidelines, check drug safety, draft a referral letter. The agent decides which tools to call and in what order based on the nurse&rsquo;s question. Tools are the agent&rsquo;s hands &mdash; how it retrieves, checks, and acts.</p>
+    </div>
+    <div class="card" style="border-top:4px solid var(--green-500);">
+      <h4 style="color:var(--green-600);">Memory</h4>
+      <p style="font-size:13px; font-weight:600; margin-bottom:8px;">DB-persisted multi-turn conversations</p>
+      <p style="font-size:12px;">Every message, tool call, and result is stored. The agent loads the last 10 turns into each call &mdash; it remembers what was asked, what it found, and what advice it gave. Full audit trail for clinical governance.</p>
+    </div>
+  </div>
+  <div class="card-grid" style="margin-top:12px;">
+    <div class="card" style="border-top:4px solid var(--amber-500);">
+      <h4 style="color:var(--amber-600);">Context</h4>
+      <p style="font-size:13px; font-weight:600; margin-bottom:8px;">Patient-specific encounter data injected per call</p>
+      <p style="font-size:12px;">Every question is grounded in the current patient: demographics, working diagnosis, vitals, SATS triage colour, current prescriptions, and extracted symptoms. The agent doesn&rsquo;t answer in the abstract &mdash; it answers for <em>this</em> patient.</p>
+    </div>
+    <div class="card" style="border-top:4px solid var(--red-500);">
+      <h4 style="color:var(--red-600);">Orchestration</h4>
+      <p style="font-size:13px; font-weight:600; margin-bottom:8px;">Agentic loop &mdash; up to 4 rounds of reasoning</p>
+      <p style="font-size:12px;">The LLM reasons about the question, calls one or more tools, evaluates results, and decides whether to call more tools or produce a final answer. Behaviour rules &mdash; care level boundaries, STG-first grounding, proactive safety flags &mdash; are defined as readable markdown documents the clinical team can review and approve.</p>
+    </div>
+  </div>
+
+  <h3 style="margin-top:32px;">How the Agent Thinks</h3>
+  <p style="font-size:14px; max-width:720px;">When a nurse asks a question, the agent doesn&rsquo;t just generate text. It reasons through a multi-step process, calling tools as needed:</p>
+  <div class="flow-row" style="margin-top:16px;">
+    <div class="flow-box" style="border-color:var(--amber-500); background:var(--amber-100);">Nurse&rsquo;s<br>Question</div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-100);">Load Context<br>&amp; Memory</div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--purple-500); background:var(--purple-100);">Reason &amp;<br>Select Tools</div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--green-500); background:var(--green-100);">Execute Tools<br>&amp; Evaluate</div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-50);">Synthesise<br>Response</div>
+  </div>
+  <p style="font-size:12px; color:var(--slate-500); margin-top:8px;">The &ldquo;Reason &amp; Select Tools&rdquo; &rarr; &ldquo;Execute &amp; Evaluate&rdquo; loop can repeat up to 4 times per question. The agent may chain multiple tools: e.g., check drug safety &rarr; find alternative &rarr; verify alternative is safe for this patient.</p>
+
+  <h3 style="margin-top:32px;">Knowledge Architecture</h3>
+  <p style="font-size:14px;">The agent&rsquo;s knowledge is stored as plain markdown files &mdash; readable, editable, version-controlled:</p>
+  <div class="code-block">
+    <div class="code-header"><span class="file-name">.claude-plugin/knowledge-base/</span><span>98 files across 7 SA clinical sources</span></div>
+    <div class="code-content"><span class="fn">stg-primary/</span>           <span class="cm"># 22 chapters &mdash; primary care treatment protocols</span>
+  <span class="fn">hospital-eml/</span>           <span class="cm"># 26 chapters &mdash; hospital-level (referral context)</span>
+  <span class="fn">paediatric-eml/</span>         <span class="cm"># 24 chapters &mdash; child-specific protocols</span>
+  <span class="fn">obstetrics-gynae/</span>       <span class="cm"># 2 files &mdash; O&G / SASOG guidelines</span>
+  <span class="fn">maternal-perinatal/</span>     <span class="cm"># 20 files &mdash; pregnancy, labour, postnatal</span>
+  <span class="fn">sats-triage/</span>            <span class="cm"># 3 files &mdash; triage scoring, discriminators</span>
+  <span class="fn">road-to-health/</span>         <span class="cm"># 1 file &mdash; under-5 development milestones</span></div>
+  </div>
+
+  <div class="guardrail guardrail-info" style="margin-top:16px;">
+    <h4>Why This Matters</h4>
+    <p>Traditional AI systems are black boxes &mdash; you can&rsquo;t see what knowledge they have or verify it. With this approach, <strong>Dr Tasleem can open any file and read exactly what the agent knows about pre-eclampsia, or burns, or paediatric pneumonia</strong>. She can flag gaps, correct errors, and add new knowledge &mdash; all without touching code. Every change is tracked in version control.</p>
+  </div>
+
+  <h3 style="margin-top:32px;">9 Tools</h3>
+  <p style="font-size:14px;">Atomic capabilities the agent selects autonomously based on the nurse&rsquo;s question:</p>
+  <div class="card-grid" style="margin-top:12px;">
+    <div class="card" style="padding:14px 18px; border-left:3px solid var(--blue-500);">
+      <p style="font-size:13px; margin:0;"><strong>1.</strong> search_guidelines &mdash; search STG with condition filter</p>
+    </div>
+    <div class="card" style="padding:14px 18px; border-left:3px solid var(--blue-500);">
+      <p style="font-size:13px; margin:0;"><strong>2.</strong> lookup_condition &mdash; full STG entry: medicines, danger signs, referral</p>
+    </div>
+    <div class="card" style="padding:14px 18px; border-left:3px solid var(--red-500);">
+      <p style="font-size:13px; margin:0;"><strong>3.</strong> check_red_flags &mdash; match symptoms against danger signs</p>
+    </div>
+    <div class="card" style="padding:14px 18px; border-left:3px solid var(--green-500);">
+      <p style="font-size:13px; margin:0;"><strong>4.</strong> search_medications &mdash; drug dosing, pregnancy safety, routes</p>
+    </div>
+    <div class="card" style="padding:14px 18px; border-left:3px solid var(--blue-500);">
+      <p style="font-size:13px; margin:0;"><strong>5.</strong> find_conditions &mdash; differential from symptoms, age/sex filtered</p>
+    </div>
+    <div class="card" style="padding:14px 18px; border-left:3px solid var(--red-500);">
+      <p style="font-size:13px; margin:0;"><strong>6.</strong> check_drug_safety &mdash; pregnancy, interactions, age concerns</p>
+    </div>
+    <div class="card" style="padding:14px 18px; border-left:3px solid var(--green-500);">
+      <p style="font-size:13px; margin:0;"><strong>7.</strong> suggest_alternative &mdash; find alternatives when contraindicated</p>
+    </div>
+    <div class="card" style="padding:14px 18px; border-left:3px solid var(--amber-500);">
+      <p style="font-size:13px; margin:0;"><strong>8.</strong> draft_referral_letter &mdash; generate referral with encounter context</p>
+    </div>
+    <div class="card" style="padding:14px 18px; border-left:3px solid var(--purple-500); grid-column: 1 / -1;">
+      <p style="font-size:13px; margin:0;"><strong>9.</strong> search_knowledge_base &mdash; search 98 markdown files across 7 sources (Hospital EML, Paediatric EML, O&G, Maternal, SATS)</p>
+    </div>
+  </div>
+
+  <h3 style="margin-top:32px;">Care Level Boundaries</h3>
+  <p>Not all conditions can be treated at primary care level. The Clinical Assistant enforces strict boundaries:</p>
+  <div class="care-level-flow" style="margin-top:16px;">
+    <div class="care-level-box" style="border-color:var(--green-500); background:var(--green-50);">
+      <h4 style="color:var(--green-600); margin-bottom:4px;">PRIMARY STG &mdash; 335 Conditions</h4>
+      <p style="font-size:13px; margin:0;">Nurse IDENTIFIES + TREATS per STG protocol. Tools 1&ndash;7 provide full treatment guidance.</p>
+    </div>
+    <div class="care-level-arrow">&darr;</div>
+    <div class="care-level-box" style="border-color:var(--amber-500); background:var(--amber-50);">
+      <h4 style="color:var(--amber-600); margin-bottom:4px;">HOSPITAL EML &mdash; 15 Referral-Only Conditions</h4>
+      <p style="font-size:13px; margin:0;">Triage IDENTIFIES but flags <strong>REFER</strong>. Tool #9 searches hospital-level KB for referral context. Tool #8 drafts the referral letter.</p>
+    </div>
+    <div class="care-level-arrow">&darr;</div>
+    <div class="care-level-box" style="border-color:var(--slate-400); background:var(--slate-100);">
+      <h4 style="color:var(--slate-600); margin-bottom:4px;">SPECIALIST &mdash; Flag + Refer</h4>
+      <p style="font-size:13px; margin:0;">Future: specialist conditions flagged for referral beyond hospital level.</p>
+    </div>
+  </div>
+
+  <div class="refer-flag" style="margin-top:16px;">
+    REFER &mdash; "Foetal Distress identified. This condition requires hospital-level care. Refer urgently to the nearest facility with obstetric services."
+  </div>
+
+  <div class="guardrail guardrail-info" style="margin-top:16px;">
+    <h4>Tasleem's Rule</h4>
+    <p>"Hospital EML knowledge is for referral context &mdash; the nurse needs to recognise these conditions so they can refer appropriately, but treatment is not in their scope."</p>
+  </div>
+</section>
+
+<!-- ===================================================================
+     PART 3: THE ENCOUNTER AGENT — DOCUMENTATION & CARE PLANS
+     =================================================================== -->
+<section class="section" id="encounter-docs">
+  <div class="section-label">Part 3: The Encounter Agent</div>
+  <h2>The Encounter Agent</h2>
+  <p class="lead" style="max-width:720px;">
+    Documentation is where nurses lose time. A proper SOAP note, a care plan the patient can understand, a discharge summary for handover &mdash; in a high-volume clinic, this paperwork often gets rushed or skipped entirely. When it does get done, the patient care plan is typically in English, regardless of the patient&rsquo;s home language, and written at a level many patients cannot follow.
+  </p>
+  <p style="font-size:14px; max-width:720px; margin-top:12px;">
+    The Encounter Agent generates all three documents automatically once the nurse confirms a diagnosis and prescribes treatment. The SOAP note meets SA legal requirements for a medical record. The patient care plan is written at Grade 8 literacy level in the patient&rsquo;s own language &mdash; any of South Africa&rsquo;s 11 official languages. Everything is grounded in the STG, print-ready, and generated in 2&ndash;3 seconds.
+  </p>
+
+  <div class="guardrail guardrail-info" style="margin-top:20px; margin-bottom:24px;">
+    <h4>Why This Matters Clinically</h4>
+    <p>Research consistently shows that patients who understand their care plan &mdash; what medicines to take, what danger signs to watch for, when to return &mdash; have better outcomes and fewer unnecessary re-presentations. A care plan in isiZulu at Grade 8 literacy is not a nice-to-have; for a patient in a rural KZN clinic, it may be the difference between following up appropriately and not. Dr Tasleem Ras has validated that the SOAP note &ldquo;meets all of the legal requirements&rdquo; for a South African medical record.</p>
+  </div>
+
+  <div class="card-grid-3" style="margin-top:24px;">
+    <div class="card" style="border-top:4px solid var(--blue-500);">
+      <h4 style="color:var(--blue-600);">SOAP Note</h4>
+      <p style="font-size:13px;">Structured clinical note for the medical record. Subjective, Objective, Assessment, Plan &mdash; all grounded in STG with guideline citations. Meets SA legal requirements for a medical record (validated by Dr Tasleem Ras).</p>
+    </div>
+    <div class="card" style="border-top:4px solid var(--green-500);">
+      <h4 style="color:var(--green-600);">Patient Care Plan</h4>
+      <p style="font-size:13px;">Patient-facing discharge instructions at Grade 8 literacy level. Medication instructions, lifestyle advice, danger signs, follow-up schedule. Available in all 11 SA official languages. Print-ready with signature lines.</p>
+    </div>
+    <div class="card" style="border-top:4px solid var(--amber-500);">
+      <h4 style="color:var(--amber-600);">Discharge Summary</h4>
+      <p style="font-size:13px;">Clinician-facing handover document. Presenting complaint, diagnosis, treatment given, follow-up plan, safety netting. Automatically flags if referral is indicated per STG criteria.</p>
+    </div>
+  </div>
+
+  <h3 style="margin-top:32px;">Multi-Language Care Plans &mdash; 11 SA Languages</h3>
+  <p style="font-size:14px;">All care plans translated at Grade 8 literacy level, print-ready with clinician/patient signature lines:</p>
+  <div style="display:flex; flex-wrap:wrap; gap:8px; margin:12px 0;">
+    <span class="source-badge source-stg">English (en)</span>
+    <span class="source-badge source-hospital">isiZulu (zu)</span>
+    <span class="source-badge source-paeds">isiXhosa (xh)</span>
+    <span class="source-badge source-og">Afrikaans (af)</span>
+    <span class="source-badge source-maternal">Sepedi (nso)</span>
+    <span class="source-badge source-sats">Setswana (tn)</span>
+    <span class="source-badge source-rth">Sesotho (st)</span>
+    <span class="source-badge" style="background:#fef3c7; color:#78350f;">Xitsonga (ts)</span>
+    <span class="source-badge" style="background:#ede9fe; color:#5b21b6;">siSwati (ss)</span>
+    <span class="source-badge" style="background:#ecfdf5; color:#065f46;">Tshivenda (ve)</span>
+    <span class="source-badge" style="background:#f0f9ff; color:#0c4a6e;">isiNdebele (nr)</span>
+  </div>
+
+  <h3 style="margin-top:32px;">How It Works</h3>
+  <div class="flow-row">
+    <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-100);">Confirmed<br>Diagnosis</div>
+    <span class="flow-arrow">+</span>
+    <div class="flow-box" style="border-color:var(--green-500); background:var(--green-100);">Prescriptions<br>&amp; Vitals</div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--amber-500); background:var(--amber-100);">Fetch STG<br>Context</div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--purple-500); background:var(--purple-100);">Generate<br>(Haiku)</div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--green-500); background:var(--green-50);">SOAP + Care Plan<br>+ Discharge</div>
+  </div>
+  <p style="font-size:12px; color:var(--slate-500); margin-top:8px;">2&ndash;3 seconds per generation. STG context fetched from the same knowledge store that powers triage.</p>
+
+  <div class="stats-row" style="margin-top:24px;">
+    <div class="stat-card">
+      <div class="stat-number" data-target="3">0</div>
+      <div class="stat-label">Document Types</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="11">0</div>
+      <div class="stat-label">SA Languages</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="2" data-suffix="s">0</div>
+      <div class="stat-label">Generation Time</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================
+     CLINICAL OPPORTUNITIES ENGINE
+     =================================================================== -->
+<section class="section" id="opportunities">
+  <div class="section-label">Proactive Clinical Support</div>
+  <h2>Clinical Opportunities Engine</h2>
+  <p>25 deterministic rules that fire automatically based on patient data. No LLM, no hallucination risk. Surfaces screening opportunities, workups, and safety alerts the nurse might otherwise miss.</p>
+
+  <h3 style="margin-top:24px;">5 Categories, 25 Rules</h3>
+
+  <div class="card" style="border-top:4px solid var(--blue-500); margin-bottom:16px;">
+    <h4 style="color:var(--blue-600);">1. Screening (7 rules)</h4>
+    <p style="font-size:13px;">Age/sex-based screening recommendations:</p>
+    <div style="font-size:13px; color:var(--slate-600); margin-top:8px; display:flex; flex-wrap:wrap; gap:8px;">
+      <span class="source-badge source-stg">Cervical cancer (F, 21-65)</span>
+      <span class="source-badge source-stg">Breast self-exam (F, 40+)</span>
+      <span class="source-badge source-stg">BP screening</span>
+      <span class="source-badge source-stg">Glucose screening</span>
+      <span class="source-badge source-stg">HIV testing</span>
+      <span class="source-badge source-stg">TB symptom screen</span>
+      <span class="source-badge source-maternal">Antenatal panel</span>
+    </div>
+  </div>
+
+  <div class="card" style="border-top:4px solid var(--amber-500); margin-bottom:16px;">
+    <h4 style="color:var(--amber-600);">2. Diagnosis-Triggered Workups (6 rules)</h4>
+    <p style="font-size:13px;">When a condition is confirmed, surface the required follow-up investigations:</p>
+    <div style="font-size:13px; color:var(--slate-600); margin-top:8px; display:flex; flex-wrap:wrap; gap:8px;">
+      <span class="source-badge source-stg">Diabetes: foot exam, eye exam, HbA1c</span>
+      <span class="source-badge source-stg">HTN: target organ damage screen</span>
+      <span class="source-badge source-stg">HIV: baseline bloods</span>
+      <span class="source-badge source-stg">Depression: PHQ-9</span>
+      <span class="source-badge source-stg">STI: partner notification</span>
+    </div>
+  </div>
+
+  <div class="card" style="border-top:4px solid var(--red-500); margin-bottom:16px;">
+    <h4 style="color:var(--red-600);">3. Vital Sign Incidentals (4 rules)</h4>
+    <p style="font-size:13px;">Abnormal vitals detected incidentally during the encounter:</p>
+    <div style="font-size:13px; color:var(--slate-600); margin-top:8px; display:flex; flex-wrap:wrap; gap:8px;">
+      <span class="source-badge source-sats">Incidental elevated BP</span>
+      <span class="source-badge source-sats">Unexplained tachycardia</span>
+      <span class="source-badge source-sats">Low SpO2</span>
+      <span class="source-badge source-sats">Hypothermia</span>
+    </div>
+  </div>
+
+  <div class="card" style="border-top:4px solid var(--purple-500); margin-bottom:16px;">
+    <h4 style="color:#7c3aed;">4. SDOH &amp; Social Assistance (4 rules)</h4>
+    <p style="font-size:13px;">Social determinants of health and government support programmes:</p>
+    <div style="font-size:13px; color:var(--slate-600); margin-top:8px; display:flex; flex-wrap:wrap; gap:8px;">
+      <span class="source-badge source-stg">SASSA disability grant eligibility</span>
+      <span class="source-badge source-stg">TB DOTS programme</span>
+      <span class="source-badge source-maternal">Free maternal care</span>
+      <span class="source-badge source-stg">SADAG helpline (depression)</span>
+    </div>
+  </div>
+
+  <div class="card" style="border-top:4px solid #dc2626; margin-bottom:16px;">
+    <h4 style="color:#dc2626;">5. Medication Safety (4 rules)</h4>
+    <p style="font-size:13px;">Drug interaction and contraindication alerts:</p>
+    <div style="font-size:13px; color:var(--slate-600); margin-top:8px; display:flex; flex-wrap:wrap; gap:8px;">
+      <span class="source-badge" style="background:#fee2e2; color:#991b1b;">ACE inhibitors in pregnancy</span>
+      <span class="source-badge" style="background:#fee2e2; color:#991b1b;">Warfarin + NSAID</span>
+      <span class="source-badge" style="background:#fee2e2; color:#991b1b;">CNS depressant stacking</span>
+      <span class="source-badge" style="background:#fee2e2; color:#991b1b;">ACE + NSAID interaction</span>
+    </div>
+  </div>
+
+</section>
+
+<!-- ===================================================================
+     THE ROAD AHEAD: SCALING PATH
+     =================================================================== -->
+<section class="section" id="scaling">
+  <div class="section-label">The Road Ahead</div>
+  <h2>Scaling Path</h2>
+  <p class="lead" style="max-width:640px;">Built for South Africa. Designed for the world.</p>
+
+  <div class="card-grid-3" style="margin-top:24px;">
+    <div class="card" style="border-top:4px solid var(--blue-500);">
+      <h4 style="color:var(--blue-600);">Phase 1: Now</h4>
+      <p style="font-size:28px; font-weight:800; color:var(--slate-900); margin:8px 0;">100&ndash;1K/day</p>
+      <p style="font-size:13px;">Single instance on Railway. 9&ndash;10s production latency. ~$0.01 per triage. 2 LLM calls per request. Supabase PostgreSQL.</p>
+    </div>
+    <div class="card" style="border-top:4px solid var(--amber-500);">
+      <h4 style="color:var(--amber-600);">Phase 2: Post-Validation</h4>
+      <p style="font-size:28px; font-weight:800; color:var(--slate-900); margin:8px 0;">10K&ndash;100K/day</p>
+      <p style="font-size:13px;">In-memory graph (~3 MB). N stateless instances. 3&ndash;4s latency. ~$0.003 per triage. Fine-tuned NER replaces extraction LLM.</p>
+    </div>
+    <div class="card" style="border-top:4px solid var(--green-500);">
+      <h4 style="color:var(--green-600);">Phase 3: Multi-Country</h4>
+      <p style="font-size:28px; font-weight:800; color:var(--slate-900); margin:8px 0;">1M+/day</p>
+      <p style="font-size:13px;">Fully deterministic (no LLM for triage). Country sharding. Edge/offline. &lt;100ms. ~$0.0005 per triage.</p>
+    </div>
+  </div>
+
+  <h3 style="margin-top:32px;">Cost at Scale</h3>
+  <div class="card-grid">
+    <div class="card" style="border-left:4px solid var(--red-500);">
+      <h4>With LLMs (1M/day)</h4>
+      <p style="font-size:28px; font-weight:800; color:var(--red-600); margin:8px 0;">$3.6M/yr</p>
+      <p style="font-size:13px;">LLM API costs dominate at scale. Not sustainable for LMIC deployment.</p>
+    </div>
+    <div class="card" style="border-left:4px solid var(--green-500);">
+      <h4>Deterministic (1M/day)</h4>
+      <p style="font-size:28px; font-weight:800; color:var(--green-600); margin:8px 0;">$180K/yr</p>
+      <p style="font-size:13px;">20x cheaper. Compute + storage only. Sustainable at LMIC price points.</p>
+    </div>
+  </div>
+
+  <h3 style="margin-top:32px;">Edge Deployment</h3>
+  <div class="guardrail guardrail-safe">
+    <h4>3 MB Graph on a Clinic Tablet</h4>
+    <p>The knowledge graph fits in memory. At Phase 3, triage runs offline on local hardware. EHR syncs when connectivity is available. No internet dependency for clinical decision support.</p>
+  </div>
+
+  <h3 style="margin-top:32px;">Multi-Country Architecture</h3>
+  <div class="flow-row">
+    <div class="flow-box" style="border-color:var(--blue-500); background:var(--blue-100);">countries table<br><small>SA, Kenya, India...</small></div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--green-500); background:var(--green-100);">guideline_sets<br><small>Per-country STG</small></div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--amber-500); background:var(--amber-100);">source_tag filter<br><small>Facility context</small></div>
+    <span class="flow-arrow">&rarr;</span>
+    <div class="flow-box" style="border-color:var(--purple-500); background:var(--purple-100);">Localised triage<br><small>Country-specific</small></div>
+  </div>
+
+  <h3 style="margin-top:32px;">Technology Stack</h3>
+  <div class="tech-grid">
+    <div class="tech-item">Python 3.11 <span>Backend</span></div>
+    <div class="tech-item">FastAPI <span>Web Framework</span></div>
+    <div class="tech-item">asyncpg <span>DB Driver</span></div>
+    <div class="tech-item">Anthropic SDK <span>Claude API</span></div>
+    <div class="tech-item">Haiku <span>All LLM Calls</span></div>
+    <div class="tech-item">PostgreSQL <span>Supabase</span></div>
+    <div class="tech-item">pgvector <span>Vector Search</span></div>
+    <div class="tech-item">Voyage AI <span>Embeddings</span></div>
+    <div class="tech-item">pdfplumber <span>PDF Text</span></div>
+    <div class="tech-item">Docling <span>Table Extraction</span></div>
+    <div class="tech-item">Railway <span>Deployment</span></div>
+    <div class="tech-item">Lovable <span>React Frontend</span></div>
+  </div>
+
+  <div style="text-align:center; margin-top:60px;">
+    <a href="https://caremateai.health" class="cta-btn" target="_blank">See CareMate Live &rarr;</a>
+  </div>
+
+  <div class="stats-row" style="margin-top:48px;">
+    <div class="stat-card">
+      <div class="stat-number" data-target="350">0</div>
+      <div class="stat-label">Conditions</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="12150" data-suffix="+">0</div>
+      <div class="stat-label">Clinical Edges</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="98">0</div>
+      <div class="stat-label">KB Files</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-number" data-target="7">0</div>
+      <div class="stat-label">Clinical Sources</div>
+    </div>
+  </div>
+
+  <p style="text-align:center; margin-top:24px; font-size:12px; color:var(--slate-400);">
+    92/92 deep test &bull; 96% adjusted clinical validation &bull; 5&ndash;6s local triage &bull; 11 SA languages &bull; 25 opportunity rules
+  </p>
+</section>
+
+</div><!-- end .content -->
+
+<!-- ===================================================================
+     JAVASCRIPT
+     =================================================================== -->
+<script>
+// -- Intersection Observer: Section visibility + sidebar tracking --
+const sections = document.querySelectorAll('.section');
+const sidebarItems = document.querySelectorAll('.progress-track li[data-section]');
+const visited = new Set();
+
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('visible');
+      const id = entry.target.id;
+      visited.add(id);
+      sidebarItems.forEach(li => {
+        li.classList.remove('active');
+        if (visited.has(li.dataset.section)) li.classList.add('visited');
+        if (li.dataset.section === id) li.classList.add('active');
+      });
+      entry.target.querySelectorAll('.stat-number').forEach(animateCounter);
+    }
+  });
+}, { threshold: 0.2, rootMargin: '-5% 0px -5% 0px' });
+
+sections.forEach(s => observer.observe(s));
+
+// Sidebar click navigation
+sidebarItems.forEach(li => {
+  li.addEventListener('click', () => {
+    const target = document.getElementById(li.dataset.section);
+    if (target) target.scrollIntoView({ behavior: 'smooth' });
+  });
+});
+
+// -- Stat Counter Animation --
+const animatedCounters = new Set();
+function animateCounter(el) {
+  if (animatedCounters.has(el)) return;
+  animatedCounters.add(el);
+  const target = parseFloat(el.dataset.target);
+  const decimals = parseInt(el.dataset.decimals) || 0;
+  const prefix = el.dataset.prefix || '';
+  const suffix = el.dataset.suffix || '';
+  const duration = 1500;
+  const start = performance.now();
+  function update(now) {
+    const elapsed = now - start;
+    const progress = Math.min(elapsed / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    const current = target * eased;
+    if (decimals > 0) {
+      el.textContent = prefix + current.toFixed(decimals) + suffix;
+    } else {
+      el.textContent = prefix + Math.floor(current).toLocaleString() + suffix;
+    }
+    if (progress < 1) requestAnimationFrame(update);
+  }
+  requestAnimationFrame(update);
+}
+
+// -- Toggle Panels --
+document.querySelectorAll('.toggle-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const panel = tab.closest('.toggle-panel');
+    panel.querySelectorAll('.toggle-tab').forEach(t => t.classList.remove('active'));
+    panel.querySelectorAll('.toggle-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.target).classList.add('active');
+  });
+});
+
+// -- Expandable Code Blocks --
+document.querySelectorAll('.code-toggle').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const block = btn.closest('.code-block');
+    block.classList.toggle('expanded');
+    btn.textContent = block.classList.contains('expanded') ? 'Show less' : 'Show more';
+  });
+});
+
+// -- Scoring Calculator --
+let scoringStep = 0;
+const meningitisSteps = [0.18, 0.12, 0.10];
+let meningitisRaw = 0;
+let meningitisTotal = 0;
+let coldTotal = 0;
+const allScoringSteps = document.querySelectorAll('#scoring-calc .scoring-step');
+const totalSteps = allScoringSteps.length;
+
+function advanceScoring() {
+  if (scoringStep >= totalSteps) return;
+  allScoringSteps[scoringStep].classList.add('active');
+
+  if (scoringStep < 3) {
+    meningitisRaw += meningitisSteps[scoringStep];
+    meningitisTotal = meningitisRaw;
+    document.getElementById('meningitis-total').textContent = meningitisTotal.toFixed(2);
+  } else if (scoringStep === 3) {
+    meningitisTotal = meningitisRaw * 2;
+    document.getElementById('meningitis-total').textContent = meningitisTotal.toFixed(2);
+  } else if (scoringStep === 4) {
+    document.getElementById('meningitis-total').textContent = meningitisTotal.toFixed(2);
+  } else if (scoringStep === 5) {
+    coldTotal = 0.12;
+    document.getElementById('cold-total').textContent = coldTotal.toFixed(2);
+  } else if (scoringStep === 6) {
+    document.getElementById('cold-total').textContent = coldTotal.toFixed(2);
+  } else if (scoringStep === 7) {
+    coldTotal = coldTotal * 1.25;
+    document.getElementById('cold-total').textContent = coldTotal.toFixed(2);
+  }
+
+  scoringStep++;
+  if (scoringStep >= totalSteps) {
+    document.getElementById('scoring-next-btn').disabled = true;
+    document.getElementById('scoring-reset-btn').style.display = 'inline-block';
+  }
+}
+
+function resetScoring() {
+  scoringStep = 0; meningitisRaw = 0; meningitisTotal = 0; coldTotal = 0;
+  allScoringSteps.forEach(s => s.classList.remove('active'));
+  document.getElementById('meningitis-total').textContent = '0.00';
+  document.getElementById('cold-total').textContent = '0.00';
+  document.getElementById('scoring-next-btn').disabled = false;
+  document.getElementById('scoring-reset-btn').style.display = 'none';
+}
+
+// -- Patient Flow Simulation --
+let pfStep = 1;
+const pfTotal = 9;
+
+function pfNext() {
+  if (pfStep >= pfTotal) return;
+  document.getElementById('pf-step-' + pfStep).classList.remove('active');
+  pfStep++;
+  document.getElementById('pf-step-' + pfStep).classList.add('active');
+  document.getElementById('pf-current').textContent = pfStep;
+  document.getElementById('pf-prev').disabled = pfStep <= 1;
+  document.getElementById('pf-next').disabled = pfStep >= pfTotal;
+  if (pfStep >= pfTotal) {
+    document.getElementById('pf-next').textContent = 'Complete';
+    document.getElementById('pf-next').disabled = true;
+  }
+}
+
+function pfPrev() {
+  if (pfStep <= 1) return;
+  document.getElementById('pf-step-' + pfStep).classList.remove('active');
+  pfStep--;
+  document.getElementById('pf-step-' + pfStep).classList.add('active');
+  document.getElementById('pf-current').textContent = pfStep;
+  document.getElementById('pf-prev').disabled = pfStep <= 1;
+  document.getElementById('pf-next').disabled = false;
+  document.getElementById('pf-next').textContent = 'Continue \u2192';
+}
+
+// -- Keyboard Navigation --
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight' && document.activeElement.tagName !== 'INPUT') {
+    const pfSection = document.getElementById('patient-journey');
+    if (pfSection) {
+      const rect = pfSection.getBoundingClientRect();
+      if (rect.top < window.innerHeight && rect.bottom > 0) {
+        pfNext();
+        e.preventDefault();
+      }
+    }
+  }
+  if (e.key === 'ArrowLeft' && document.activeElement.tagName !== 'INPUT') {
+    const pfSection = document.getElementById('patient-journey');
+    if (pfSection) {
+      const rect = pfSection.getBoundingClientRect();
+      if (rect.top < window.innerHeight && rect.bottom > 0) {
+        pfPrev();
+        e.preventDefault();
+      }
+    }
+  }
+});
+</script>
+</body>
+</html>
