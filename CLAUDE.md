@@ -15,13 +15,13 @@ Clinical decision support tool for South African primary healthcare nurses. Matc
 - **caremate.co.za** — public landing page / marketing website (registered 2026-03-02)
 - **caremateai.health** — the live app (clinical tool)
 
-## Current System Status (as of 2026-03-07)
+## Current System Status (as of 2026-03-10)
 
 ### What's Built and Live
 - **Backend**: FastAPI on Railway (`https://caremate-api-production.up.railway.app`), healthy
 - **Frontend**: Lovable React app (GitHub: `raheelr/caremateaihealth`), connected to backend
 - **Database**: Supabase + pgvector, 350 conditions (335 STG primary + 15 referral-only), 12,150+ clinical edges, 1,532 knowledge chunks
-- **Triage Agent**: Full pipeline — extract → expand → search → score → safety → synthesise
+- **Triage Agent**: Full pipeline — extract → expand → search → score → safety → synthesise. Model fallback chain (Haiku → Sonnet) on 429/529 errors.
 - **Encounter Agent**: SOAP note, care plan (multi-language + print), discharge summary generation — all STG-grounded
 - **Clinical Assistant**: Multi-turn conversational agent with 9 tools (guidelines, drugs, safety, referrals, KB search)
 - **Knowledge Base**: 98 markdown files across 7 sources in `.claude-plugin/knowledge-base/` — STG (22), Hospital EML (26), Paediatric EML (24), O&G (2), Maternal (20), SATS (3), Road to Health (1)
@@ -73,6 +73,7 @@ caremate-backend-v2/
 - `safety/checker.py` — SafetyChecker (defense-in-depth review)
 - `db/database.py` — all query functions incl `get_condition_features_batch()`, `get_vitals_mappings()`, assistant conversation persistence
 - `db/migrations/004_care_setting_and_referral.sql` — adds `source_tag`, `care_setting`, `referral_required` columns to conditions table
+- `ingestion/enrich_missing_edges.py` — targeted edge enrichment for conditions failing deep test (measles, CKD, hyperthyroidism, etc.)
 - `ingestion/add_referral_conditions.py` — script to add referral-only conditions (15 O&G + Hospital EML critical) with symptom edges
 
 ### API Endpoints (Live)
@@ -131,11 +132,12 @@ Supports all 11 SA official languages at Grade 8 literacy level (print-ready):
 `en` English, `zu` isiZulu, `xh` isiXhosa, `af` Afrikaans, `nso` Sepedi, `tn` Setswana, `st` Sesotho, `ts` Xitsonga, `ss` siSwati, `ve` Tshivenda, `nr` isiNdebele
 
 ### Triage Pipeline (2 LLM calls + DB queries)
-1. **Haiku**: Extract symptoms from complaint (temperature=0)
+1. **Haiku** (with fallback to Sonnet on 429/529): Extract symptoms from complaint (temperature=0)
 2. **DB only**: expand_synonyms (batch LATERAL) → search_conditions (batch CTE, no vector search) → safety + details + features (all parallel, batch queries)
-3. **Haiku** (parallel): Slim re-rank + assessment questions (~160 output tokens, max_tokens=512) + safety review (~20 tokens)
-   - Condition_symptoms generated from DB clinical_entities (no LLM)
+3. **Haiku** (parallel, with fallback): Slim re-rank + assessment questions (~160 output tokens, max_tokens=512) + safety review (~20 tokens)
+   - Condition_symptoms generated from DB clinical_entities (no LLM) — all features returned with `is_red_flag` + `source_citation` metadata
    - Acuity computed deterministically via SATS/TEWS (`agents/sats.py`)
+   - Referral-only conditions propagate `referral_required`, `care_setting`, `source_tag` to frontend
    - Vector search skipped (zero unique results vs graph+synonym search)
 
 ### Current Acuity System — SATS (South African Triage Scale)
@@ -225,12 +227,12 @@ cd ~/Downloads/caremate-backend-v2 && source venv/bin/activate
 | Adult Health | 5/5 | — |
 | Geriatrics | 2-3/5 | Case 2: CKD (lab-only edges), Case 4: falls risk (not in DB) |
 
-**5 Knowledge Base Gaps Identified (fixes needed)**:
-1. **Foetal distress** — condition not in STG DB. Add from obstetric emergencies section.
-2. **Learning difficulty/ADHD** — not in STG DB. May need separate source beyond primary care STG.
-3. **Adult hyperthyroidism** — exists as children/adolescent only (age 0-18, IDs 1450-1452). Has excellent symptom edges. Need adult version or extend age range.
-4. **CKD symptom edges** — condition exists (ID 1416, 25 edges) but edges are lab-based (creatinine, eGFR). Need clinical presentation edges: fatigue, pruritus, nocturia, peripheral oedema.
-5. **Falls risk / orthostatic hypotension / polypharmacy** — not in STG DB. Consider adding from SATS or geriatric guidelines.
+**5 Knowledge Base Gaps Identified — 3 FIXED, 2 unfixable**:
+1. ~~**Foetal distress**~~ — FIXED. Added as referral-only condition with 19 symptom edges.
+2. **Learning difficulty/ADHD** — not in STG DB. Out of scope for primary care STG.
+3. ~~**Adult hyperthyroidism**~~ — FIXED. Extended max_age from 18→999 via `enrich_missing_edges.py`.
+4. ~~**CKD symptom edges**~~ — FIXED. Added clinical presentation edges (fatigue, oedema, nocturia, pruritus) via `enrich_missing_edges.py`.
+5. **Falls risk / orthostatic hypotension / polypharmacy** — not in STG DB. Out of scope.
 
 ### Reference Documents
 - Meeting transcript: `Meeting started 2026_02_28 09_50 EST - Notes by Gemini.pdf` (in project root)
