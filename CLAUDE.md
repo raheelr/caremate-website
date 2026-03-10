@@ -11,47 +11,92 @@ Clinical decision support tool for South African primary healthcare nurses. Matc
 ## Project Location
 `~/Downloads/caremate-backend-v2`
 
-## Current System Status (as of 2026-02-28)
+## Domains
+- **caremate.co.za** — public landing page / marketing website (registered 2026-03-02)
+- **caremateai.health** — the live app (clinical tool)
+
+## Current System Status (as of 2026-03-07)
 
 ### What's Built and Live
 - **Backend**: FastAPI on Railway (`https://caremate-api-production.up.railway.app`), healthy
 - **Frontend**: Lovable React app (GitHub: `raheelr/caremateaihealth`), connected to backend
-- **Database**: Supabase + pgvector, 442 conditions, 12,732 clinical edges, 1,528 knowledge chunks
+- **Database**: Supabase + pgvector, 350 conditions (335 STG primary + 15 referral-only), 12,150+ clinical edges, 1,532 knowledge chunks
 - **Triage Agent**: Full pipeline — extract → expand → search → score → safety → synthesise
-- **Deep Test**: 65/65 conditions found (100% top-5 hit rate), EXCELLENT grade
-- **Performance**: 11-17s end-to-end (was 35-48s, optimised 2026-02-28)
+- **Encounter Agent**: SOAP note, care plan (multi-language + print), discharge summary generation — all STG-grounded
+- **Clinical Assistant**: Multi-turn conversational agent with 9 tools (guidelines, drugs, safety, referrals, KB search)
+- **Knowledge Base**: 98 markdown files across 7 sources in `.claude-plugin/knowledge-base/` — STG (22), Hospital EML (26), Paediatric EML (24), O&G (2), Maternal (20), SATS (3), Road to Health (1)
+- **Referral-Only Conditions**: 15 conditions (9 O&G + 6 Hospital EML critical) with `referral_required=TRUE` — triage FINDS them but says REFER, not TREAT
+- **Care Level Boundaries**: Primary STG (treat) → Hospital EML (referral context only) → Specialist (flag + refer). Enforced in Clinical Assistant system prompt and knowledge model.
+- **Clinical Opportunities Engine**: 25 deterministic rules — screening, dx-triggered workups, vitals nudges, SDOH, med safety
+- **Deep Test**: 92/92 conditions found (97.8% top-5, 92.4% Top-1), EXCELLENT grade
+- **Performance**: 9-10s production triage, 5-6s local; 2-3s per encounter generation; <1ms opportunities
 - **Deploy command**: `cd ~/Downloads/caremate-backend-v2 && railway up`
+- **Presentation**: Architecture deck at `public/presentation/index.html` in frontend repo (Lovable-deployed)
+- **Architecture Diagram**: Solution architecture at `public/architecture/index.html` — 5 tabs (Stack, Agents, Flow, Status, Scaling)
+- **EHR Prototype**: Clickable prototype at `public/prototype/index.html` — patient queue, chart, encounter flow, AI assistant
 
 ### Folder Structure
 ```
 caremate-backend-v2/
-  agents/          ← triage agent + tools (BUILT)
-  api/             ← FastAPI server (BUILT, 6 endpoints)
+  agents/          ← 3 agents (triage, encounter, clinical assistant) + tools + SATS + opportunities + KB search
+  api/             ← FastAPI server (BUILT, 19+ endpoints)
   safety/          ← safety checker (BUILT)
-  db/              ← database queries + schema
+  db/              ← database queries + schema + migrations (001-004)
   ingestion/       ← STG PDF → knowledge graph pipeline (COMPLETE)
+  .claude-plugin/  ← knowledge base architecture
+    knowledge-base/  ← 98 markdown files across 7 clinical sources
+      stg-primary/       ← 22 STG chapters
+      hospital-eml/      ← 26 Hospital Level EML chapters
+      paediatric-eml/    ← 24 Paediatric EML chapters
+      obstetrics-gynae/  ← 2 O&G guideline files
+      maternal-perinatal/ ← 20 maternal care files
+      sats-triage/       ← 3 SATS manual files
+      road-to-health/    ← 1 under-5 development file
+    agents/            ← agent behaviour definitions (markdown)
+  presentation/    ← architecture deck + clinician overview (source copies)
+  docs/            ← TODO.md, EHR_PLAN.md, planning docs
   venv/            ← Python virtual environment
-  stg.pdf          ← SA Standard Treatment Guidelines source
-  SATS-Manual-A5-LR-spreads.pdf  ← SA Triage Scale manual (TO INGEST)
 ```
 
 ### Key Files
-- `api/main.py` — FastAPI app, CORS, connection pool
+- `api/main.py` — FastAPI app, 19+ endpoints (triage + encounter + assistant + vignette survey + guidelines + prescribing), CORS, connection pool
 - `api/models.py` — Pydantic models matching frontend contracts
 - `agents/triage_agent.py` — TriageAgent class (analyze + refine), deterministic synthesis
-- `agents/tools.py` — 6 tool handlers, batch DB queries, prevalence boost
+- `agents/encounter_agent.py` — Encounter documentation: `generate_soap_note()`, `generate_care_plan()`, `generate_discharge_summary()` — all STG-grounded
+- `agents/clinical_assistant.py` — ClinicalAssistant class, 9-tool agentic loop (guidelines, drugs, safety, referrals, KB search), multi-turn DB-persisted conversations
+- `agents/kb_search.py` — File-based markdown KB search engine for Clinical Assistant tool #9, searches 98 files across 7 knowledge sources
+- `agents/opportunities.py` — ClinicalOpportunitiesEngine: 25 deterministic rules across 5 categories (screening, dx-workups, vitals, SDOH, med safety)
+- `agents/tools.py` — 6 triage tool handlers, batch DB queries, prevalence boost
+- `agents/sats.py` — SATS triage: `compute_sats_acuity()`, TEWS vital scoring (adult + child), clinical discriminators
+- `agents/scoring_config.py` — centralised scoring constants, feature weights, prevalence tiers, non-disease penalties
 - `agents/embeddings.py` — Voyage AI wrapper (voyage-3-lite, 512 dims)
 - `safety/checker.py` — SafetyChecker (defense-in-depth review)
-- `db/database.py` — all query functions
+- `db/database.py` — all query functions incl `get_condition_features_batch()`, `get_vitals_mappings()`, assistant conversation persistence
+- `db/migrations/004_care_setting_and_referral.sql` — adds `source_tag`, `care_setting`, `referral_required` columns to conditions table
+- `ingestion/add_referral_conditions.py` — script to add referral-only conditions (15 O&G + Hospital EML critical) with symptom edges
 
 ### API Endpoints (Live)
 ```
+Triage:
 POST /api/triage/analyze     ← main triage (complaint + vitals + patient → differential)
 POST /api/triage/refine      ← follow-up with assessment answers → re-ranked conditions
 POST /api/triage/enrich      ← condition treatment details
-POST /api/rag/query          ← RAG-based clinical question answering
-POST /api/prescribing/suggest-dosing  ← medication dosing
 GET  /api/health             ← health check (public, no API key)
+
+Encounter Agent:
+POST /api/encounter/generate-soap              ← SOAP note from encounter data
+POST /api/encounter/generate-care-plan         ← patient-facing care plan (multi-language, print-ready)
+POST /api/encounter/generate-discharge-summary ← clinician-facing discharge summary
+POST /api/encounter/clinical-opportunities     ← proactive screening/safety/SDOH nudges
+
+Clinical Assistant:
+POST /api/assistant/chat     ← multi-turn conversational AI (9 tools, DB-persisted)
+
+Clinical Reference:
+POST /api/rag/query                    ← RAG-based clinical question answering
+POST /api/guidelines/lookup            ← structured STG guideline sections
+POST /api/prescribing/suggest-dosing   ← medication dosing
+POST /api/prescribing/recommended-drugs ← drugs for condition by treatment line
 
 Phase II Clinician Survey:
 GET  /api/vignettes                  ← list all vignettes
@@ -63,19 +108,46 @@ POST /api/vignettes/:id/run-caremate ← auto-run CareMate on a vignette
 ```
 - API Key header: `X-API-Key`
 
-### Triage Pipeline (3 LLM calls + DB queries)
-1. **Haiku**: Extract symptoms from complaint (temperature=0)
-2. **DB only**: expand_synonyms → search_conditions (batch CTE queries) → score → safety → details
-3. **Haiku**: Slim re-rank + assessment questions (~200 output tokens, max_tokens=1024)
-   - Condition_symptoms generated from DB clinical_entities (no LLM)
-   - Acuity computed deterministically from vitals thresholds
-   - Safety review runs in parallel with assessment generation
+### Clinical Assistant — 9 Tools
+1. `search_guidelines` — search STG knowledge base with optional condition filter (DB)
+2. `lookup_condition` — full STG entry: description, danger signs, medicines, referral criteria (DB)
+3. `check_red_flags` — match symptoms against danger signs (DB)
+4. `search_medications` — drug dosing, pregnancy safety, paediatric dosing, routes (DB)
+5. `find_conditions` — differential diagnosis from symptoms, age/sex filtered (DB)
+6. `check_drug_safety` — patient-specific safety: pregnancy, interactions, age concerns (in-memory)
+7. `suggest_alternative` — find alternative drugs when one is contraindicated (DB)
+8. `draft_referral_letter` — generate referral letter with encounter context (LLM)
+9. `search_knowledge_base` — search extended markdown KB beyond STG: Hospital EML, Paediatric EML, O&G, Maternal, SATS (file-based)
 
-### Current Acuity System (3-tier)
-- `routine` — normal vitals, no red flags (DEFAULT)
-- `priority` — mild vital abnormality (temp >= 39C, HR > 120/<50) OR single red flag
-- `urgent` — severe vitals (BP >= 180, SpO2 < 92, RR >= 30) OR multiple red flags
-- Computed in `_compute_vitals_acuity()` + safety review escalation guard
+### Clinical Opportunities Engine — 25 Rules, 5 Categories
+- **Screening** (7): cervical cancer, breast self-exam, BP, glucose, HIV, TB, antenatal panel
+- **Dx-Triggered Workups** (6): diabetes foot/eye/HbA1c, HTN target organ damage, HIV baseline, depression PHQ-9, STI partner notification
+- **Vitals Safety Nudges** (4): incidental elevated BP, unexplained tachycardia, low SpO2, hypothermia
+- **SDOH & Social Assistance** (4): SASSA disability grant, TB DOTS, free maternal care, SADAG helpline
+- **Medication Safety** (4): ACE in pregnancy, warfarin+NSAID, CNS stacking, ACE+NSAID
+
+### Multi-Language Care Plans
+Supports all 11 SA official languages at Grade 8 literacy level (print-ready):
+`en` English, `zu` isiZulu, `xh` isiXhosa, `af` Afrikaans, `nso` Sepedi, `tn` Setswana, `st` Sesotho, `ts` Xitsonga, `ss` siSwati, `ve` Tshivenda, `nr` isiNdebele
+
+### Triage Pipeline (2 LLM calls + DB queries)
+1. **Haiku**: Extract symptoms from complaint (temperature=0)
+2. **DB only**: expand_synonyms (batch LATERAL) → search_conditions (batch CTE, no vector search) → safety + details + features (all parallel, batch queries)
+3. **Haiku** (parallel): Slim re-rank + assessment questions (~160 output tokens, max_tokens=512) + safety review (~20 tokens)
+   - Condition_symptoms generated from DB clinical_entities (no LLM)
+   - Acuity computed deterministically via SATS/TEWS (`agents/sats.py`)
+   - Vector search skipped (zero unique results vs graph+synonym search)
+
+### Current Acuity System — SATS (South African Triage Scale)
+- **Red** (Emergency, TEWS 7+) — immediate
+- **Orange** (Very Urgent, TEWS 5-6) — < 10 minutes
+- **Yellow** (Urgent, TEWS 3-4) — < 60 minutes
+- **Green** (Routine, TEWS 0-2) — < 4 hours
+- TEWS scores 7 components: HR, RR, SBP, Temp, consciousness (AVPU), mobility, trauma (each 0-3 points)
+- Clinical discriminators (e.g. active seizure, chest pain at rest) override TEWS and assign colour directly
+- Age-stratified thresholds (adult vs child HR/RR tables)
+- Backward-compatible `acuity` field: Green→routine, Yellow→priority, Orange/Red→urgent
+- Computed in `agents/sats.py: compute_sats_acuity()` + safety review escalation guard
 
 ## Environment Variables (.env)
 ```
@@ -90,6 +162,13 @@ API_KEY=...                    ← Backend API key
 cd ~/Downloads/caremate-backend-v2 && source venv/bin/activate
 ```
 
+## Open Priorities (see `docs/TODO.md` for full list)
+- **EVAH RFP**: Secure partners, finalize Pathway A proposal by Apr 1
+- **Knowledge Base**: COMPLETE — 98 files across 7 sources. 15 referral-only conditions added. Care level boundaries enforced.
+- **Validation**: Phase II survey frontend + Tasleem's vignettes, O&G re-test with Tasleem's sister
+- **Compliance**: AWS Cape Town migration, SAHPRA consultation, POPIA DPIA
+- **Product**: Care setting context switch, EHR layer, deploy to clinics, landing page (caremate.co.za)
+
 ---
 
 ## Roadmap — Feb 28, 2026 Team Call Decisions
@@ -101,34 +180,102 @@ cd ~/Downloads/caremate-backend-v2 && source venv/bin/activate
 
 ### Tier 1 — Immediate / Required for Validation
 1. **SATS integration** — DONE (commit 341a589). `agents/sats.py` implements TEWS vital sign scoring (adult + child tables) + clinical discriminator checking. Replaces hard-coded vitals thresholds with nationally standardised SATS colour system (Red/Orange/Yellow/Green). Backward-compatible `acuity` field preserved.
-2. **Phase II clinician survey form** — BACKEND DONE. DB tables `clinical_vignettes` + `vignette_responses` created. 6 API endpoints: list/create/get vignettes, submit responses, compare results, auto-run CareMate. 3 seed vignettes loaded. **Awaiting**: frontend survey form + Tasleem's vignettes.
-3. **Regional/local prevalence tuning** — SCORING CONFIG MERGED. `agents/scoring_config.py` centralises all feature weights, prevalence tiers, non-disease penalties. SA-wide prevalence tiers active (28 conditions). **Remaining**: per-province granularity (Western Cape vs KZN vs Limpopo) not yet implemented.
+2. **Phase I vignette validation** — DONE (2026-03-01). Tasleem provided 30 vignettes across 6 domains. **Results: 24/30 Top-1 correct (80%), adjusted 96% excluding KB gaps.** 5 misses all due to knowledge base gaps, not algorithm failures. See "Phase I Results" section below.
+3. **Phase II clinician survey form** — BACKEND DONE. DB tables `clinical_vignettes` + `vignette_responses` created. 6 API endpoints: list/create/get vignettes, submit responses, compare results, auto-run CareMate. 3 seed vignettes loaded. **Awaiting**: frontend survey form + Tasleem's vignettes.
+4. **Regional/local prevalence tuning** — SCORING CONFIG MERGED. `agents/scoring_config.py` centralises all feature weights, prevalence tiers, non-disease penalties. SA-wide prevalence tiers active (28 conditions). **Remaining**: per-province granularity (Western Cape vs KZN vs Limpopo) not yet implemented.
 
 ### Tier 2 — High Value, Near-Term
-4. **Investigation recommendations as structured output** — Labs/imaging from STG as discrete fields, not buried in text chunks
+4. ~~**Investigation recommendations as structured output**~~ — DONE. Dx-triggered workup rules in `agents/opportunities.py` surface labs/investigations proactively.
 5. **Care setting context switch** — `care_setting` parameter (primary/hospital/emergency) filtering knowledge corpus
-6. **Non-pharma interventions as structured output** — Lifestyle advice, counselling, physiotherapy referrals
+6. ~~**Non-pharma interventions as structured output**~~ — DONE. Lifestyle advice + danger signs returned as structured arrays in care plan. SDOH assistance surfaced by opportunities engine.
 
 ### Tier 3 — Strategic / Medium-Term
 7. **Longitudinal patient record (EHR layer)** — Patient history across encounters, continuity of care
-8. **Drug interaction / prescription clash checking** — Requires EHR layer
+8. ~~**Drug interaction / prescription clash checking**~~ — DONE. `check_drug_safety` tool in Clinical Assistant + medication safety rules in Opportunities Engine (ACE+NSAID, warfarin+NSAID, CNS stacking, ACE in pregnancy)
 9. **API-first / embeddable mode** — CareMate as embeddable API inside other EHRs
 
 ### Tier 4 — Vision / Long-Term
 10. Real-time clinical oversight dashboard
-11. Multi-country / Africa expansion
-12. Paramedic / pre-hospital triage
-13. Multimodal input (glasses/audio)
+11. **Multi-country expansion** — `countries` + `guideline_sets` tables, `source_tag` on all knowledge corpus, country-adaptive patient IDs, triage system dispatch. Architecture designed for SSA, South Asia, Southeast Asia (aligned with EVAH RFP). Full plan: `docs/EHR_PLAN.md`
+12. **Multi-care-setting** — primary + hospital + emergency + community. Same condition → different protocols per setting. SA Hospital STG = first multi-source ingestion after Tier 1 MVP.
+13. Paramedic / pre-hospital triage
+14. Multimodal input (glasses/audio)
 
 ### Key Architectural Decisions from Call
-- **Stay focused on primary care first** — complete end-to-end before hospital/tertiary STGs
-- **Knowledge corpus will become multi-source** — needs `source_tag` column (stg_primary, sats_triage, stg_hospital) before ingesting SATS
+- **Multi-country from the architecture up** — `countries` + `guideline_sets` tables determine which clinical guidelines, triage system, formulary, and languages are active per facility
+- **Knowledge corpus is multi-source** — `source_tag` column (stg_primary_za, sats_triage, stg_hospital_za, eml_ke, etc.) on conditions, knowledge_chunks, clinical_entities. All queries filter by facility context.
+- **Multi-care-setting** — `care_setting` on facilities + triage requests. Primary care and hospital protocols differ for same conditions.
 - **Scoring weights need clinician validation** — Phase II will reveal if 0.18/0.12/0.08 weights match how clinicians think
 - **Output format needs to expand** — add: structured investigations, non-pharma interventions, clearer refer yes/no, follow-up plan
+
+### Phase I Validation Results (2026-03-01)
+
+**Test**: 30 clinical vignettes by Dr Tasleem Ras across 6 domains (Pregnancy, Under 5, Schoolgoing, Adolescent, Adult Health, Geriatrics — 5 each). Run blind through CareMate triage agent, system knowledge only.
+
+**Files**: `Tasleem Tests March 1/run_vignettes.py` (runner), `vignette_results.json` (raw output), `*_FILLED.xlsx` (formatted results + comparison)
+
+**Overall: 24/30 Top-1 correct (80%). Adjusted: 24/25 = 96% excluding KB gaps.**
+
+| Domain | Top-1 | Missed |
+|--------|:-----:|--------|
+| Pregnancy | 4/5 | Case 4: foetal distress (not in DB) |
+| Under 5 | 5/5 | — |
+| Schoolgoing | 4/5 | Case 1: learning difficulty (not in DB) |
+| Adolescent | 4/5 | Case 5: hyperthyroidism (age-filtered, 22yo vs 0-18 limit) |
+| Adult Health | 5/5 | — |
+| Geriatrics | 2-3/5 | Case 2: CKD (lab-only edges), Case 4: falls risk (not in DB) |
+
+**5 Knowledge Base Gaps Identified (fixes needed)**:
+1. **Foetal distress** — condition not in STG DB. Add from obstetric emergencies section.
+2. **Learning difficulty/ADHD** — not in STG DB. May need separate source beyond primary care STG.
+3. **Adult hyperthyroidism** — exists as children/adolescent only (age 0-18, IDs 1450-1452). Has excellent symptom edges. Need adult version or extend age range.
+4. **CKD symptom edges** — condition exists (ID 1416, 25 edges) but edges are lab-based (creatinine, eGFR). Need clinical presentation edges: fatigue, pruritus, nocturia, peripheral oedema.
+5. **Falls risk / orthostatic hypotension / polypharmacy** — not in STG DB. Consider adding from SATS or geriatric guidelines.
 
 ### Reference Documents
 - Meeting transcript: `Meeting started 2026_02_28 09_50 EST - Notes by Gemini.pdf` (in project root)
 - Prioritised plan: `Feb 28 2026 CAll with Tasleem and Numaan.pdf` (in project root)
+- Phase I vignettes: `Tasleem Tests March 1/TestVignettesMarch1Tasleem.pdf`
+
+## EVAH RFP — Evidence for AI in Health (active, deadline April 1, 2026)
+
+**Funders**: Wellcome Trust + Gates Foundation + Novo Nordisk Foundation (via J-PAL / APHRC)
+**RFP**: `RFP/RFP Overview - Evidence for AI in Health_0.pdf`
+**What**: Funding to evaluate AI-enabled CDSTs for frontline PHC workers in LMICs (Sub-Saharan Africa, South Asia, Southeast Asia)
+**Pathway A** (our fit): Up to $1M, 3-12 months — real-world deployment & systems integration evidence for early-deployment tools
+**Pathway B**: Up to $3M, 12-24 months — rigorous impact evaluation for at-scale tools
+
+### Why CareMate Fits
+- Exact use case match: AI CDST for SA primary care nurses, STG-based, SATS triage
+- Validation data exists: 92/92 deep test, Phase I 24/30 vignettes (96% adj.)
+- High-burden LMIC conditions, reducing inequities in under-resourced settings
+
+### Key Eligibility Requirements
+- Lead applicant must be **legally registered & operational in SSA** with PI based in region
+- Must have **clinical implementation partner** (MoH, public sector facility, or NGO)
+- Team must demonstrate **health systems research / impact evaluation expertise**
+- **80% of funds** must flow to SSA-based entities
+- Funding does **NOT** support software development — only evaluation + necessary implementation/scaling
+- Must be **beyond proof of concept** with demonstrable accuracy in validation studies
+
+### Action Items
+- [x] RFP analysed (2026-03-02)
+- [x] 5 clarifying questions drafted for evah@povertyactionlab.org (due March 6)
+- [ ] Submit questions by March 6
+- [ ] Secure SA-based lead applicant entity (Dr Tasleem's institution or SA university)
+- [ ] Identify evaluation/research partner (UCT, Stellenbosch, Wits — health sciences)
+- [ ] Formalize clinical implementation partner (letter of support from clinic/district)
+- [ ] Build landing page at caremate.co.za
+- [ ] Write Pathway A proposal (due April 1)
+
+### Application Timeline
+| Date | Milestone |
+|------|-----------|
+| Feb 20 | RFP released |
+| **Mar 6** | **Questions deadline** (evah@povertyactionlab.org) |
+| Mar 13 | FAQ published on RFP page |
+| **Apr 1** | **Application deadline** (10am EDT / 4pm CAT) |
+| Jun 2026 | Notification (estimated) |
 
 ## Key Architectural Decisions
 - Standard Anthropic SDK + tool_use (NOT Agent SDK, NOT LangGraph/CrewAI)
@@ -136,3 +283,15 @@ cd ~/Downloads/caremate-backend-v2 && source venv/bin/activate
 - Symptom matching through knowledge graph — never condition name lookup
 - Deterministic synthesis: only assessment_questions + re-ranking use LLM
 - FastAPI backend on Railway, React frontend on Lovable
+- **The Moat = Clinical Knowledge Engine** — ingestion pipeline + knowledge store + runtime services (synonym expansion, scoring, SATS, safety). Deterministic, validated, shared by all 3 agents
+- **3 Agents with distinct problem shapes**: Triage (search-and-rank), Encounter (reasoning), Clinical Assistant (retrieval)
+- **LLM calls are scaffolding** — will be replaced at scale by fine-tuned NER (extraction), trained ranker (re-ranking), rule-based checks (safety). Validation data = training data.
+- **Claude-native NOT right for the moat** — moat needs deterministic scoring, queryable graph, validated weights (92/92 deep test). Claude-native is right for Encounter Agent + Clinical Assistant (reasoning tasks, lower volume)
+- **Knowledge graph is ~3 MB** — fits in process memory. At scale: in-memory graph, no DB for triage, edge deployment on clinic tablets
+
+## Scaling Path (decided 2026-03-05)
+- **Phase 1 (now)**: Single instance, 100–1K/day, 9–10s latency, ~$0.01/triage
+- **Phase 2 (post-validation)**: In-memory graph, N stateless instances, 10K–100K/day, 3–4s
+- **Phase 3 (multi-country)**: Fully deterministic (no LLM for triage), country sharding, edge/offline, 1M+/day, <100ms, ~$0.0005/triage
+- Cost at 1M/day: $3.6M/yr with LLMs vs $180K/yr deterministic (20x)
+- Architecture diagram: `caremateai.health/architecture` (Scaling Path tab)

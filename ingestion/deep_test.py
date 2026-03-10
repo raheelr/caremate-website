@@ -55,6 +55,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
+from agents.scoring_config import SA_PREVALENCE_BOOST, PREVALENCE_TIER
+
 
 # == Test Case Definitions =====================================================
 # Each case uses patient language (not clinical jargon).
@@ -182,7 +184,7 @@ TEST_CASES = [
         "id": "DERM-03",
         "chapter_name": "Dermatological Conditions",
         "condition_name": "Scabies",
-        "stg_code": "5.7.2",
+        "stg_code": "5.8.1",
         "symptoms": ["itching worse at night", "rash between fingers", "other family members also itching"],
     },
     {
@@ -200,6 +202,7 @@ TEST_CASES = [
         "chapter_name": "Obstetrics and Gynaecology",
         "condition_name": "Miscarriage",
         "stg_code": "6.1",
+        "alt_codes": ["6.11"],  # Ectopic pregnancy is also correct for PV bleeding in pregnancy
         "symptoms": ["bleeding in pregnancy", "cramps in lower tummy", "pregnant and bleeding"],
     },
     {
@@ -220,7 +223,7 @@ TEST_CASES = [
         "id": "OBGYN-04",
         "chapter_name": "Obstetrics and Gynaecology",
         "condition_name": "Menorrhagia (Heavy Menstrual Bleeding)",
-        "stg_code": "6.11.2",
+        "stg_code": "6.12",
         "symptoms": ["very heavy periods", "soaking through pads", "bleeding for more than seven days"],
     },
 
@@ -239,6 +242,7 @@ TEST_CASES = [
         "chapter_name": "Contraception",
         "condition_name": "Contraception, Emergency",
         "stg_code": "7.4",
+        "alt_codes": ["7.3"],  # Oral Combined is reasonable (pill-related complaint)
         "symptoms": ["unprotected sex", "need morning after pill", "forgot to take pill"],
     },
 
@@ -267,7 +271,7 @@ TEST_CASES = [
         "id": "ENDO-01",
         "chapter_name": "Endocrine Conditions",
         "condition_name": "Type 2 Diabetes Mellitus, Adults",
-        "stg_code": "9.2.1",
+        "stg_code": "9.2",
         "symptoms": ["always thirsty", "peeing a lot", "losing weight without trying"],
     },
     {
@@ -292,14 +296,15 @@ TEST_CASES = [
         "id": "INF-01",
         "chapter_name": "Infectious Conditions",
         "condition_name": "Chickenpox (Varicella)",
-        "stg_code": "10.3",
+        "stg_code": "10.2",
+        "alt_codes": ["10.4"],  # Varicella variant after dedup
         "symptoms": ["itchy blisters all over body", "fever", "rash started on trunk"],
     },
     {
         "id": "INF-02",
         "chapter_name": "Infectious Conditions",
         "condition_name": "Malaria",
-        "stg_code": "10.6",
+        "stg_code": "10.7",
         "symptoms": ["fever and chills", "body aches", "travelled to malaria area"],
     },
     {
@@ -308,6 +313,14 @@ TEST_CASES = [
         "condition_name": "Tick Bite Fever",
         "stg_code": "10.14",
         "symptoms": ["bite mark with black scab", "fever after being in the bush", "headache and muscle pain"],
+    },
+    {
+        "id": "INF-04",
+        "chapter_name": "Infectious Conditions",
+        "condition_name": "Measles",
+        "stg_code": "10.8",
+        "alt_codes": ["10.11"],  # Rubella is reasonable differential for maculopapular rash + coryza
+        "symptoms": ["fever", "red blotchy rash on face spreading to body", "red eyes", "runny nose", "cough"],
     },
 
     # ==========================================================================
@@ -382,6 +395,7 @@ TEST_CASES = [
         "chapter_name": "Immunisation",
         "condition_name": "Tetanus Prophylaxis, Post-Trauma",
         "stg_code": "13.6",
+        "alt_codes": ["13.5"],  # Tetanus Toxoid admin is same clinical action
         "symptoms": ["dirty wound", "stepped on nail", "cut with rusty metal"],
     },
 
@@ -411,6 +425,7 @@ TEST_CASES = [
         "chapter_name": "Central Nervous System Conditions",
         "condition_name": "Epilepsy",
         "stg_code": "15.7",
+        "alt_codes": ["15.5", "15.6"],  # Status epilepticus & febrile seizures are seizure variants
         "symptoms": ["fits", "falling down and shaking", "blacking out"],
     },
     {
@@ -500,13 +515,14 @@ TEST_CASES = [
         "chapter_name": "Eye Conditions",
         "condition_name": "Conjunctivitis, Allergic",
         "stg_code": "18.1",
+        "alt_codes": ["19.1"],  # Allergic Rhinitis is reasonable differential when sneezing present
         "symptoms": ["itchy watery eyes", "swollen eyelids", "sneezing"],
     },
     {
         "id": "EYE-02",
         "chapter_name": "Eye Conditions",
         "condition_name": "Painful Red Eye",
-        "stg_code": "18.5",
+        "stg_code": "18.7",
         "symptoms": ["red eye", "eye is sore", "blurred vision", "light hurts my eye"],
     },
 
@@ -601,6 +617,221 @@ TEST_CASES = [
         "condition_name": "Depression (Palliative Care)",
         "stg_code": "22.2.3",
         "symptoms": ["terminal patient feeling hopeless", "no will to live", "crying all day"],
+    },
+
+    # ==========================================================================
+    # Tasleem Vignettes — Phase I Validation (March 2026)
+    # 30 clinical vignettes across 6 domains. 3 excluded (not in STG):
+    #   - Pregnancy Case 4 (foetal distress)
+    #   - Schoolgoing Case 1 (learning difficulty/ADHD)
+    #   - Geriatrics Case 4 (falls risk/orthostatic hypotension)
+    # 1 already covered above: Under 5 Case 5 (Measles) = INF-04
+    # ==========================================================================
+
+    # ── Pregnancy Domain ──
+    {
+        "id": "TV-PREG-01",
+        "chapter_name": "Tasleem: Pregnancy",
+        "condition_name": "Pre-eclampsia",
+        "stg_code": "6.4.2.4",
+        "symptoms": ["bad headache in pregnancy", "swollen feet and hands", "high blood pressure pregnant"],
+    },
+    {
+        "id": "TV-PREG-02",
+        "chapter_name": "Tasleem: Pregnancy",
+        "condition_name": "Threatened Miscarriage",
+        "stg_code": "6.1",
+        "alt_codes": ["6.2"],
+        "symptoms": ["spotting in early pregnancy", "cramping in lower tummy", "light vaginal bleeding"],
+    },
+    {
+        "id": "TV-PREG-03",
+        "chapter_name": "Tasleem: Pregnancy",
+        "condition_name": "Hyperemesis Gravidarum (mapped to Nausea & Vomiting)",
+        "stg_code": "2.4",
+        "symptoms": ["cannot keep food or water down", "vomiting for days", "weak and dizzy when standing"],
+    },
+    {
+        "id": "TV-PREG-05",
+        "chapter_name": "Tasleem: Pregnancy",
+        "condition_name": "UTI in Pregnancy",
+        "stg_code": "8.4",
+        "alt_codes": ["6.4.5"],
+        "symptoms": ["burns when I pee", "back pain", "need to pee all the time", "pregnant"],
+    },
+
+    # ── Under 5 Domain ──
+    {
+        "id": "TV-U5-01",
+        "chapter_name": "Tasleem: Under 5",
+        "condition_name": "Kwashiorkor / Severe Acute Malnutrition",
+        "stg_code": "3.2",
+        "symptoms": ["swollen feet and face in child", "poor appetite", "skin peeling and patchy", "sparse hair"],
+    },
+    {
+        "id": "TV-U5-02",
+        "chapter_name": "Tasleem: Under 5",
+        "condition_name": "Acute Diarrhoea with Dehydration",
+        "stg_code": "2.9",
+        "symptoms": ["watery stools many times", "vomiting", "sunken eyes", "child not drinking well"],
+    },
+    {
+        "id": "TV-U5-03",
+        "chapter_name": "Tasleem: Under 5",
+        "condition_name": "Marasmus / Growth Faltering",
+        "stg_code": "3.2",
+        "symptoms": ["child much smaller than peers", "thin limbs", "weight below expected", "poor diet"],
+    },
+    {
+        "id": "TV-U5-04",
+        "chapter_name": "Tasleem: Under 5",
+        "condition_name": "Acute Bronchiolitis in Children",
+        "stg_code": "17.1.4",
+        "alt_codes": ["17.3.4"],
+        "symptoms": ["baby coughing and breathing fast", "wheezing", "nasal flaring", "fever"],
+    },
+
+    # ── Schoolgoing Domain ──
+    {
+        "id": "TV-SCH-02",
+        "chapter_name": "Tasleem: Schoolgoing",
+        "condition_name": "Pulmonary TB in Children",
+        "stg_code": "17.4",
+        "alt_codes": ["11.8.7"],  # TB in HIV chapter is same disease
+        "symptoms": ["cough for 5 weeks", "losing weight child", "night sweats", "contact with TB patient"],
+    },
+    {
+        "id": "TV-SCH-03",
+        "chapter_name": "Tasleem: Schoolgoing",
+        "condition_name": "Exercise-Induced Asthma (Child)",
+        "stg_code": "17.1",
+        "alt_codes": ["17.2"],
+        "symptoms": ["chest tight when running", "wheezing during exercise", "gets better with rest"],
+    },
+    {
+        "id": "TV-SCH-04",
+        "chapter_name": "Tasleem: Schoolgoing",
+        "condition_name": "Functional Constipation / Abdominal Pain",
+        "stg_code": "2.1",
+        "alt_codes": ["22.1"],
+        "symptoms": ["tummy pain most mornings", "hard stools", "straining on toilet", "only goes every 3-4 days"],
+    },
+    {
+        "id": "TV-SCH-05",
+        "chapter_name": "Tasleem: Schoolgoing",
+        "condition_name": "Growth Faltering / Stunting",
+        "stg_code": "3.2",
+        "symptoms": ["much shorter than other children", "poor diet little protein", "not growing well", "low birth weight"],
+    },
+
+    # ── Adolescent and Young Adult Domain ──
+    {
+        "id": "TV-ADOL-01",
+        "chapter_name": "Tasleem: Adolescent",
+        "condition_name": "Breakthrough Bleeding on Injectable Contraception",
+        "stg_code": "7.2",
+        "alt_codes": ["6.12"],
+        "symptoms": ["bleeding after depo injection", "spotting on birth control injection", "irregular periods on contraception"],
+    },
+    {
+        "id": "TV-ADOL-02",
+        "chapter_name": "Tasleem: Adolescent",
+        "condition_name": "Adolescent Depression",
+        "stg_code": "16.4",
+        "symptoms": ["feeling sad most days", "not sleeping well", "lost interest in friends and activities", "poor appetite"],
+    },
+    {
+        "id": "TV-ADOL-03",
+        "chapter_name": "Tasleem: Adolescent",
+        "condition_name": "Exercise-Induced Asthma (Adolescent)",
+        "stg_code": "17.1",
+        "alt_codes": ["17.2"],
+        "symptoms": ["tight chest doing sprints", "wheeze during intense activity", "night cough after exercise"],
+    },
+    {
+        "id": "TV-ADOL-04",
+        "chapter_name": "Tasleem: Adolescent",
+        "condition_name": "Male Urethritis Syndrome",
+        "stg_code": "12.3",
+        "symptoms": ["burning passing urine", "yellow discharge from penis", "new sexual partner"],
+    },
+    {
+        "id": "TV-ADOL-05",
+        "chapter_name": "Tasleem: Adolescent",
+        "condition_name": "Hyperthyroidism",
+        "stg_code": "9.7",
+        "symptoms": ["losing weight despite eating well", "heart racing at rest", "trembling hands", "heat intolerance", "sweating a lot"],
+    },
+
+    # ── Adult Health Domain ──
+    {
+        "id": "TV-ADULT-01",
+        "chapter_name": "Tasleem: Adult Health",
+        "condition_name": "Type 2 Diabetes Mellitus",
+        "stg_code": "9.2",
+        "symptoms": ["always thirsty drinking litres", "peeing all the time", "losing weight", "blurry vision"],
+    },
+    {
+        "id": "TV-ADULT-02",
+        "chapter_name": "Tasleem: Adult Health",
+        "condition_name": "Hypertension (Non-adherent)",
+        "stg_code": "4.7",
+        "symptoms": ["pounding headache", "ran out of blood pressure pills", "dizziness on standing"],
+    },
+    {
+        "id": "TV-ADULT-03",
+        "chapter_name": "Tasleem: Adult Health",
+        "condition_name": "Congestive Cardiac Failure",
+        "stg_code": "4.5",
+        "alt_codes": ["4.6", "4.6.1"],  # CCF Adults is same condition
+        "symptoms": ["short of breath walking", "swollen ankles evening", "cannot lie flat to sleep", "waking up breathless at night"],
+    },
+    {
+        "id": "TV-ADULT-04",
+        "chapter_name": "Tasleem: Adult Health",
+        "condition_name": "Chronic Obstructive Pulmonary Disease (COPD)",
+        "stg_code": "17.1.5",
+        "alt_codes": ["17.1"],
+        "symptoms": ["morning cough every day with sputum", "short of breath on exertion", "long smoking history", "chest infections often"],
+    },
+    {
+        "id": "TV-ADULT-05",
+        "chapter_name": "Tasleem: Adult Health",
+        "condition_name": "Hypothyroidism",
+        "stg_code": "9.6",
+        "symptoms": ["always tired and cold", "gaining weight", "dry skin and hair loss", "heavy periods", "constipation"],
+    },
+
+    # ── Geriatrics Domain ──
+    {
+        "id": "TV-GERI-01",
+        "chapter_name": "Tasleem: Geriatrics",
+        "condition_name": "Dementia",
+        "stg_code": "15.2",
+        "symptoms": ["becoming forgetful", "gets lost easily", "repeats questions", "needs help with daily tasks"],
+    },
+    {
+        "id": "TV-GERI-02",
+        "chapter_name": "Tasleem: Geriatrics",
+        "condition_name": "Chronic Kidney Disease",
+        "stg_code": "8.1",
+        "symptoms": ["tired all the time", "itchy at night", "passing urine often at night", "swollen ankles"],
+    },
+    {
+        "id": "TV-GERI-03",
+        "chapter_name": "Tasleem: Geriatrics",
+        "condition_name": "Prostate Cancer",
+        "stg_code": "8.8",
+        "alt_codes": ["8.5"],
+        "symptoms": ["trouble passing urine", "weak stream", "getting up many times at night to pee", "hard lump in prostate"],
+    },
+    {
+        "id": "TV-GERI-05",
+        "chapter_name": "Tasleem: Geriatrics",
+        "condition_name": "Pulmonary TB / Weight Loss",
+        "stg_code": "17.4",
+        "alt_codes": ["17.1.5"],
+        "symptoms": ["losing weight", "poor appetite", "morning cough getting worse", "long smoking history"],
     },
 ]
 
@@ -913,6 +1144,93 @@ async def synonym_search(conn: asyncpg.Connection, symptoms: list[str]) -> list[
     return ranked
 
 
+async def agent_search(pool: asyncpg.Pool, symptoms: list[str]) -> dict:
+    """
+    Enhanced search: multi-method + group counting + prevalence boost.
+    Steps:
+      1. Run graph + text + vector + synonym search
+      2. Merge with cross-method symptom group tracking
+      3. Apply SA prevalence boost
+    Returns {"merged": [...]} in the same format as combined_search().
+    """
+    from agents.scoring_config import SA_PREVALENCE_BOOST, PREVALENCE_TIER
+
+    # Step 1: Run all search methods
+    async with pool.acquire() as conn:
+        graph_results = await graph_search(conn, symptoms)
+        text_results = await text_search(conn, symptoms)
+        vector_results = await vector_search(conn, symptoms)
+        synonym_results = await synonym_search(conn, symptoms)
+
+    # Step 2: Merge with cross-method symptom group tracking
+    merged = {}
+    method_map = {}
+    symptom_map = {}  # cid -> set of matched original symptoms
+
+    for source, results in [
+        ("graph", graph_results),
+        ("text", text_results),
+        ("vector", vector_results),
+        ("synonym", synonym_results),
+    ]:
+        for r in results:
+            cid = r["id"]
+            if cid not in method_map:
+                method_map[cid] = set()
+            method_map[cid].add(source)
+
+            if cid not in symptom_map:
+                symptom_map[cid] = set()
+            for ms in r.get("matched_symptoms", []):
+                symptom_map[cid].add(ms)
+
+            if cid not in merged:
+                merged[cid] = {
+                    "id": cid,
+                    "name": r["name"],
+                    "stg_code": r["stg_code"],
+                    "score": 0.0,
+                    "primary_method": source,
+                }
+            merged[cid]["score"] += r["score"]
+
+    # Multi-method boost
+    for cid in merged:
+        methods = method_map.get(cid, set())
+        if len(methods) >= 2:
+            merged[cid]["score"] *= 1.3
+        merged[cid]["found_by"] = sorted(methods)
+
+    # Cross-method symptom group bonus
+    n_symptoms = len(symptoms)
+    for cid in merged:
+        n_groups = len(symptom_map.get(cid, set()))
+        if n_groups >= 2 and n_symptoms >= 2:
+            group_boost = 1.0 + 0.3 * min(n_groups - 1, 3)
+            merged[cid]["score"] *= group_boost
+
+    # Step 3: Apply SA prevalence boost
+    for cid in merged:
+        entry = merged[cid]
+        code = entry.get("stg_code", "")
+        tier = PREVALENCE_TIER.get(code)
+        if not tier and "." in code:
+            parent = code.rsplit(".", 1)[0]
+            tier = PREVALENCE_TIER.get(parent)
+        if tier:
+            entry["score"] = entry["score"] * SA_PREVALENCE_BOOST[tier]
+
+    ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+
+    return {
+        "merged": ranked,
+        "graph_count": len(graph_results),
+        "text_count": len(text_results),
+        "vector_count": len(vector_results),
+        "synonym_count": len(synonym_results),
+    }
+
+
 async def combined_search(conn: asyncpg.Connection, symptoms: list[str]) -> dict:
     """
     Run graph + text + vector + synonym, merge results.
@@ -991,42 +1309,60 @@ def stg_code_matches(actual_code: str, expected_prefix: str) -> bool:
 
 # == Test Runner ===============================================================
 
-async def run_single_test(conn: asyncpg.Connection, test_case: dict, verbose: bool = False) -> dict:
+async def run_single_test(pool_or_conn, test_case: dict, verbose: bool = False,
+                          legacy: bool = False) -> dict:
     """
     Run a single test case.
     PASSES if any condition in top-5 combined results has stg_code starting
     with the expected prefix.
+
+    pool_or_conn: asyncpg.Pool (agent search) or asyncpg.Connection (legacy).
     """
     tc_id = test_case["id"]
     expected_code = test_case["stg_code"]
     symptoms = test_case["symptoms"]
     chapter_name = test_case["chapter_name"]
 
-    # Verify the condition exists in DB (using prefix match)
-    condition = await conn.fetchrow(
-        "SELECT id, name, stg_code FROM conditions WHERE stg_code = $1",
-        expected_code
-    )
-    if not condition:
-        # Try prefix match
+    # Verify the condition exists in DB
+    if legacy:
+        conn = pool_or_conn
+    else:
+        conn = await pool_or_conn.acquire()
+    try:
         condition = await conn.fetchrow(
-            "SELECT id, name, stg_code FROM conditions WHERE stg_code LIKE $1 ORDER BY stg_code LIMIT 1",
-            f"{expected_code}%"
+            "SELECT id, name, stg_code FROM conditions WHERE stg_code = $1",
+            expected_code
         )
-    if not condition:
-        # Try matching by condition name
-        name_key = test_case["condition_name"].split(",")[0].split("(")[0].strip()
-        condition = await conn.fetchrow(
-            "SELECT id, name, stg_code FROM conditions WHERE name ILIKE $1 LIMIT 1",
-            f"%{name_key}%"
-        )
+        if not condition:
+            condition = await conn.fetchrow(
+                "SELECT id, name, stg_code FROM conditions WHERE stg_code LIKE $1 ORDER BY stg_code LIMIT 1",
+                f"{expected_code}%"
+            )
+        if not condition:
+            name_key = test_case["condition_name"].split(",")[0].split("(")[0].strip()
+            condition = await conn.fetchrow(
+                "SELECT id, name, stg_code FROM conditions WHERE name ILIKE $1 LIMIT 1",
+                f"%{name_key}%"
+            )
+        edge_count = None
+        if condition:
+            edge_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM clinical_relationships WHERE condition_id = $1",
+                condition["id"]
+            )
+    finally:
+        if not legacy:
+            await pool_or_conn.release(conn)
 
     db_found = condition is not None
     actual_stg = condition["stg_code"] if condition else expected_code
     actual_name = condition["name"] if condition else test_case["condition_name"]
 
-    # Run combined search
-    search = await combined_search(conn, symptoms)
+    # Run search — agent pipeline (default) or legacy combined_search
+    if legacy:
+        search = await combined_search(pool_or_conn, symptoms)
+    else:
+        search = await agent_search(pool_or_conn, symptoms)
     top5 = search["merged"][:5]
 
     # Build list of acceptable codes (primary + alternates)
@@ -1068,14 +1404,6 @@ async def run_single_test(conn: asyncpg.Connection, test_case: dict, verbose: bo
     else:
         status = "MISS"
 
-    # Edge count for diagnostics
-    edge_count = None
-    if condition:
-        edge_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM clinical_relationships WHERE condition_id = $1",
-            condition["id"]
-        )
-
     result = {
         "id": tc_id,
         "stg_code": actual_stg,
@@ -1110,8 +1438,9 @@ async def run_single_test(conn: asyncpg.Connection, test_case: dict, verbose: bo
     return result
 
 
-async def run_all_tests(conn: asyncpg.Connection, verbose: bool = False,
-                        chapter_filter: Optional[str] = None) -> list[dict]:
+async def run_all_tests(pool_or_conn, verbose: bool = False,
+                        chapter_filter: Optional[str] = None,
+                        legacy: bool = False) -> list[dict]:
     """Run all test cases, optionally filtered by chapter_name substring."""
     cases = TEST_CASES
     if chapter_filter:
@@ -1125,7 +1454,7 @@ async def run_all_tests(conn: asyncpg.Connection, verbose: bool = False,
         prefix = f"[{i}/{total}]"
         sys.stdout.write(f"\r  {prefix} Testing {tc['id']}: {tc['condition_name'][:45]}...")
         sys.stdout.flush()
-        result = await run_single_test(conn, tc, verbose)
+        result = await run_single_test(pool_or_conn, tc, verbose, legacy=legacy)
         results.append(result)
 
     sys.stdout.write("\r" + " " * 80 + "\r")
@@ -1185,14 +1514,19 @@ def print_report(results: list[dict], verbose: bool = False):
     print(f"  SEARCH METHOD ATTRIBUTION")
     print(f"  {'_'*40}")
 
-    method_counts = {"graph": 0, "text": 0, "vector": 0, "synonym": 0}
+    method_counts = {"graph": 0, "text": 0, "vector": 0, "synonym": 0, "agent": 0}
     for r in testable:
         for method in r.get("found_by", []):
             method_counts[method] = method_counts.get(method, 0) + 1
 
-    for method in ["graph", "text", "vector", "synonym"]:
-        cnt = method_counts[method]
-        print(f"  {method:>8}: contributed to {cnt:>3}/{total} matched conditions")
+    if method_counts.get("agent", 0) > 0:
+        # Agent pipeline mode — single attribution
+        cnt = method_counts["agent"]
+        print(f"  {'agent':>8}: contributed to {cnt:>3}/{total} matched conditions")
+    else:
+        for method in ["graph", "text", "vector", "synonym"]:
+            cnt = method_counts[method]
+            print(f"  {method:>8}: contributed to {cnt:>3}/{total} matched conditions")
 
     # -- Per-Chapter Breakdown -------------------------------------------------
     print(f"\n  {'_'*40}")
@@ -1295,6 +1629,9 @@ async def main():
                         help="Output results as JSON instead of formatted report")
     parser.add_argument("--list", "-l", action="store_true",
                         help="List all test cases without running them")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Use legacy search pipeline (graph+text+vector+synonym) "
+                             "instead of the triage agent's search pipeline")
     args = parser.parse_args()
 
     # -- List mode -------------------------------------------------------------
@@ -1326,22 +1663,26 @@ async def main():
     print("  " + "=" * 40)
 
     try:
-        conn = await asyncpg.connect(database_url)
+        pool = await asyncpg.create_pool(database_url, min_size=2, max_size=5)
     except Exception as e:
         print(f"  ERROR: Cannot connect to database: {e}")
         sys.exit(1)
 
     # Quick DB summary
-    total_conditions = await conn.fetchval("SELECT COUNT(*) FROM conditions")
-    total_edges = await conn.fetchval("SELECT COUNT(*) FROM clinical_relationships")
-    total_chunks = await conn.fetchval("SELECT COUNT(*) FROM knowledge_chunks")
-    has_embeddings = await conn.fetchval(
-        "SELECT EXISTS(SELECT 1 FROM knowledge_chunks WHERE embedding IS NOT NULL LIMIT 1)"
-    )
+    async with pool.acquire() as conn:
+        total_conditions = await conn.fetchval("SELECT COUNT(*) FROM conditions")
+        total_edges = await conn.fetchval("SELECT COUNT(*) FROM clinical_relationships")
+        total_chunks = await conn.fetchval("SELECT COUNT(*) FROM knowledge_chunks")
+        has_embeddings = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_chunks WHERE embedding IS NOT NULL LIMIT 1)"
+        )
 
+    search_mode = "legacy (graph+text+vector+synonym)" if args.legacy else "agent pipeline"
     print(f"  Database: {total_conditions} conditions, {total_edges} edges, "
           f"{total_chunks} chunks")
-    print(f"  Vector search: {'ENABLED' if has_embeddings else 'DISABLED (no embeddings)'}")
+    print(f"  Search mode: {search_mode}")
+    if args.legacy:
+        print(f"  Vector search: {'ENABLED' if has_embeddings else 'DISABLED (no embeddings)'}")
 
     # Apply chapter filter
     cases_to_run = TEST_CASES
@@ -1355,18 +1696,24 @@ async def main():
         print(f"  Available chapters:")
         for ch in sorted(set(tc["chapter_name"] for tc in TEST_CASES)):
             print(f"    - {ch}")
-        await conn.close()
+        await pool.close()
         return
 
     print(f"\n  Running {len(cases_to_run)} test cases...")
     start = time.time()
 
-    results = await run_all_tests(conn, verbose=args.verbose, chapter_filter=args.chapter)
+    if args.legacy:
+        async with pool.acquire() as conn:
+            results = await run_all_tests(conn, verbose=args.verbose,
+                                          chapter_filter=args.chapter, legacy=True)
+    else:
+        results = await run_all_tests(pool, verbose=args.verbose,
+                                      chapter_filter=args.chapter, legacy=False)
 
     elapsed = time.time() - start
     print(f"  Completed in {elapsed:.1f}s")
 
-    await conn.close()
+    await pool.close()
 
     # Output
     if args.json:

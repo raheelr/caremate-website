@@ -78,12 +78,16 @@ SA_PREVALENCE_BOOST = {
 PREVALENCE_TIER = {
     # Respiratory
     "17.2": "high",       # Asthma
-    "17.3.3": "high",     # Pneumonia
+    "17.3.3": "high",     # Pneumonia (parent)
+    "17.3.4": "high",     # Pneumonia (child)
+    "17.3.4.1": "high",   # Pneumonia (specific)
     "17.3.1": "high",     # Influenza
     "17.1.5": "high",     # COPD
     "19.2": "high",       # Common cold
     "19.6": "high",       # Tonsillitis/Pharyngitis
     # Cardiovascular
+    "4.5": "high",        # CCF
+    "4.6.1": "high",      # CCF in adults
     "4.7": "high",        # Hypertension
     "4.7.1": "high",      # Hypertension in adults
     # Metabolic
@@ -97,6 +101,7 @@ PREVALENCE_TIER = {
     # Infectious
     "17.4.1": "high",     # Pulmonary TB
     "10.7": "moderate",   # Malaria
+    "8.1": "moderate",    # CKD
     "8.2": "high",        # UTI
     # STI
     "12.1": "high",       # VDS

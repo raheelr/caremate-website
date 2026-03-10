@@ -369,6 +369,7 @@ Flag your own uncertainty honestly in ambiguity_flags."""
             "clinical_features": [],
             "medicines": [],
             "referral_criteria": [],
+            "_extraction_failed": True,
             "ambiguity_flags": {
                 "ambiguity_score": 0.8,
                 "ambiguity_notes": "Extraction failed — needs manual review"

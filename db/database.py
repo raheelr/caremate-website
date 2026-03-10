@@ -485,6 +485,9 @@ async def get_conditions_for_symptoms(
             c.name,
             c.chapter_name,
             c.extraction_confidence,
+            c.referral_required,
+            c.care_setting,
+            c.source_tag,
             COUNT(DISTINCT cr.id) as match_count,
             SUM(CASE
                 WHEN cr.feature_type = 'diagnostic_feature' THEN 0.18
@@ -503,7 +506,8 @@ async def get_conditions_for_symptoms(
              OR ($5 = 'male' AND c.applies_to_male IS NOT FALSE)
              OR ($5 = 'female' AND c.applies_to_female IS NOT FALSE))
         AND ($6::int IS NULL OR (c.min_age_years <= $6 AND c.max_age_years >= $6))
-        GROUP BY c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence
+        GROUP BY c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence,
+                 c.referral_required, c.care_setting, c.source_tag
         ORDER BY raw_score DESC
         LIMIT $4
     """, symptom_names, patient_is_child, patient_is_pregnant, limit,
@@ -1094,3 +1098,86 @@ async def search_knowledge_chunks(
             LIMIT $3
         """, f"%{query}%", section_role, limit)
     return [dict(r) for r in rows]
+
+
+# ── Assistant conversation persistence ──────────────────────
+
+
+async def create_assistant_conversation(
+    conn: asyncpg.Connection,
+    encounter_id: str | None = None,
+    patient_context: dict | None = None,
+) -> str:
+    """Create a new assistant conversation, return its UUID."""
+    import json
+    row = await conn.fetchrow(
+        """
+        INSERT INTO assistant_conversations (encounter_id, patient_context)
+        VALUES ($1, $2::jsonb)
+        RETURNING id
+        """,
+        encounter_id,
+        json.dumps(patient_context or {}),
+    )
+    return str(row["id"])
+
+
+async def get_assistant_messages(
+    conn: asyncpg.Connection,
+    conversation_id: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Get messages for a conversation, ordered oldest-first."""
+    rows = await conn.fetch(
+        """
+        SELECT id, role, content, sources, tools_used, tool_calls, created_at
+        FROM assistant_messages
+        WHERE conversation_id = $1
+        ORDER BY created_at ASC
+        LIMIT $2
+        """,
+        conversation_id,
+        limit,
+    )
+    results = []
+    for r in rows:
+        d = dict(r)
+        d["created_at"] = d["created_at"].isoformat() if d["created_at"] else None
+        import json
+        for col in ("sources", "tools_used", "tool_calls"):
+            if isinstance(d[col], str):
+                d[col] = json.loads(d[col])
+        results.append(d)
+    return results
+
+
+async def save_assistant_message(
+    conn: asyncpg.Connection,
+    conversation_id: str,
+    role: str,
+    content: str,
+    sources: list | None = None,
+    tools_used: list | None = None,
+    tool_calls: list | None = None,
+) -> int:
+    """Save a message and return its id."""
+    import json
+    row = await conn.fetchrow(
+        """
+        INSERT INTO assistant_messages
+            (conversation_id, role, content, sources, tools_used, tool_calls)
+        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb)
+        RETURNING id
+        """,
+        conversation_id,
+        role,
+        content,
+        json.dumps(sources or []),
+        json.dumps(tools_used or []),
+        json.dumps(tool_calls or []),
+    )
+    await conn.execute(
+        "UPDATE assistant_conversations SET updated_at = NOW() WHERE id = $1",
+        conversation_id,
+    )
+    return row["id"]

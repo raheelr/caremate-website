@@ -135,6 +135,22 @@ class RAGQueryResponse(BaseModel):
     error: Optional[str] = None
 
 
+# ── POST /api/assistant/chat ────────────────────────────────────────────────
+
+class AssistantChatRequest(BaseModel):
+    message: str
+    conversation_id: Optional[str] = None      # None = start new conversation
+    encounter_context: Optional[dict] = None   # patient, condition, triage, vitals
+
+
+class AssistantChatResponse(BaseModel):
+    conversation_id: str
+    response: str                              # markdown text
+    sources: list[dict] = []                   # [{stg_code, condition_name, section_role, excerpt}]
+    tools_used: list[str] = []                 # ["search_guidelines", "lookup_condition"]
+    message_id: int = 0
+
+
 # ── POST /api/prescribing/suggest-dosing ─────────────────────────────────────
 
 class DosingRequest(BaseModel):
@@ -147,7 +163,55 @@ class DosingRequest(BaseModel):
 
 
 class DosingResponse(BaseModel):
-    suggestion: str
+    suggestion: dict  # structured dosing object
+
+
+# ── Encounter Agent — Clinical Documentation ────────────────────────────────
+
+class GenerateSOAPRequest(BaseModel):
+    condition_name: str
+    condition_code: Optional[str] = None
+    patient: dict                              # {name, age, sex}
+    chief_complaint: Optional[str] = None
+    collected_data: dict = {}                  # assessment answers + vitals
+    prescriptions: list[dict] = []             # [{drug_generic, dose, frequency, duration}]
+    triage_context: Optional[dict] = None
+
+
+class GenerateSOAPResponse(BaseModel):
+    soap_note: str                             # full SOAP text (markdown)
+    sections: dict = {}                        # {subjective, objective, assessment, plan}
+
+
+class GenerateCarePlanRequest(BaseModel):
+    condition_name: str
+    condition_code: Optional[str] = None
+    patient: dict                              # {name, age, sex}
+    prescriptions: list[dict] = []
+    language: str = "en"                       # future: "zu", "xh", "af"
+
+
+class GenerateCarePlanResponse(BaseModel):
+    care_plan: str                             # patient-facing markdown
+    follow_up_days: Optional[int] = None
+    danger_signs: list[str] = []               # when to return immediately
+    lifestyle_advice: list[str] = []
+
+
+class GenerateDischargeRequest(BaseModel):
+    condition_name: str
+    condition_code: Optional[str] = None
+    patient: dict
+    prescriptions: list[dict] = []
+    collected_data: dict = {}
+    triage_context: Optional[dict] = None
+    soap_note: Optional[str] = None            # if SOAP was already generated
+
+
+class GenerateDischargeSummaryResponse(BaseModel):
+    summary: str                               # clinician-facing discharge summary
+    referral_needed: bool = False
+    follow_up_plan: str = ""
 
 
 # ── Phase II Clinician Survey ─────────────────────────────────────────────────
@@ -205,6 +269,17 @@ class VignetteResponse(BaseModel):
     additional_info: Optional[str] = None
     difficulty: str = "medium"
     response_count: int = 0
+
+
+class GuidelinesLookupRequest(BaseModel):
+    condition_name: str
+    patient_age: Optional[int] = None
+
+
+class RecommendedDrugsRequest(BaseModel):
+    condition_name: str
+    patient_age: Optional[int] = None
+    patient_sex: Optional[str] = None
 
 
 class SubmitResponseRequest(BaseModel):

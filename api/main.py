@@ -7,7 +7,8 @@ Endpoints:
   POST /api/triage/analyze       — initial triage analysis
   POST /api/triage/refine        — iterative refinement with answers
   POST /api/triage/enrich        — protocol enrichment for a condition
-  POST /api/rag/query            — RAG-powered clinical Q&A
+  POST /api/rag/query            — RAG-powered clinical Q&A (single-shot, legacy)
+  POST /api/assistant/chat       — multi-turn conversational clinical assistant
   POST /api/prescribing/suggest-dosing — medicine dosing suggestions
   GET  /api/health               — health check
 
@@ -31,6 +32,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
+import anthropic
 import asyncpg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -48,15 +50,24 @@ from api.models import (
     EnrichRequest,
     RAGQueryRequest,
     DosingRequest,
+    AssistantChatRequest,
+    GenerateSOAPRequest,
+    GenerateCarePlanRequest,
+    GenerateDischargeRequest,
+    GuidelinesLookupRequest,
+    RecommendedDrugsRequest,
     CreateVignetteRequest,
     SubmitResponseRequest,
 )
 from agents.triage_agent import TriageAgent
+from agents.clinical_assistant import ClinicalAssistant
+from agents.encounter_agent import generate_soap_note, generate_care_plan, generate_discharge_summary
 from safety.checker import SafetyChecker
 from db.database import (
     get_condition_detail, get_condition_by_stg_code, search_knowledge_chunks,
     create_vignette, list_vignettes, get_vignette, save_vignette_response,
     get_vignette_responses, get_vignette_comparison,
+    create_assistant_conversation, get_assistant_messages, save_assistant_message,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -76,6 +87,7 @@ async def lifespan(app: FastAPI):
     pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     app.state.pool = pool
     app.state.agent = TriageAgent(pool)
+    app.state.assistant = ClinicalAssistant(pool)
     app.state.safety = SafetyChecker()
 
     # Verify DB connection
@@ -100,13 +112,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://caremateaihealth.lovable.app",  # Production Lovable
-        "https://preview--caremateaihealth.lovable.app",  # Lovable preview
-        "http://localhost:5173",                  # Local Vite dev
-        "http://localhost:3000",                  # Local alt dev
-        "https://caremate-backend-v2-production.up.railway.app",  # Railway
-    ],
+    allow_origin_regex=r"https://.*\.lovableproject\.com|https://.*\.lovable\.app|https://caremateai\.health|https://www\.caremateai\.health|http://localhost:(5173|3000)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -119,7 +125,7 @@ API_KEY = os.getenv("API_KEY")
 
 @app.middleware("http")
 async def verify_api_key(request: Request, call_next):
-    # Health check is public (Railway healthcheck needs it)
+    # Health check is public
     if request.url.path == "/api/health":
         return await call_next(request)
 
@@ -151,6 +157,7 @@ async def health():
         return {"status": "healthy", "conditions_loaded": count}
     except Exception as e:
         return {"status": "degraded", "error": str(e)}
+
 
 
 # ── POST /api/triage/analyze ────────────────────────────────────────────────
@@ -331,11 +338,82 @@ async def query_rag(request: RAGQueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── POST /api/assistant/chat ──────────────────────────────────────────────────
+
+@app.post("/api/assistant/chat")
+async def assistant_chat(request: AssistantChatRequest):
+    """Multi-turn conversational clinical assistant with tool use."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            # Resolve or create conversation
+            if request.conversation_id:
+                conversation_id = request.conversation_id
+                # Load conversation history (last 10 turns = 20 messages)
+                history = await get_assistant_messages(conn, conversation_id, limit=20)
+            else:
+                encounter_id = (request.encounter_context or {}).get("encounter_id")
+                conversation_id = await create_assistant_conversation(
+                    conn,
+                    encounter_id=encounter_id,
+                    patient_context=request.encounter_context,
+                )
+                history = []
+
+            # Save user message
+            user_msg_id = await save_assistant_message(
+                conn, conversation_id, "user", request.message,
+            )
+
+        # Run the assistant agent
+        result = await app.state.assistant.chat(
+            message=request.message,
+            conversation_history=history,
+            encounter_context=request.encounter_context,
+        )
+
+        # Save assistant response
+        async with app.state.pool.acquire() as conn:
+            asst_msg_id = await save_assistant_message(
+                conn,
+                conversation_id,
+                "assistant",
+                result["response"],
+                sources=result.get("sources"),
+                tools_used=result.get("tools_used"),
+                tool_calls=result.get("tool_calls_detail"),
+            )
+
+        return {
+            "conversation_id": conversation_id,
+            "response": result["response"],
+            "sources": result.get("sources", []),
+            "tools_used": result.get("tools_used", []),
+            "message_id": asst_msg_id,
+        }
+
+    except anthropic.APIStatusError as e:
+        logger.error(f"Assistant chat failed (Anthropic API): {e}", exc_info=True)
+        if e.status_code == 529:
+            raise HTTPException(
+                status_code=503,
+                detail="The AI service is temporarily overloaded. Please try again in a few seconds.",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail="The AI service returned an error. Please try again.",
+        )
+    except Exception as e:
+        logger.error(f"Assistant chat failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── POST /api/prescribing/suggest-dosing ─────────────────────────────────────
 
 @app.post("/api/prescribing/suggest-dosing")
 async def suggest_dosing(request: DosingRequest):
-    """Get dosing suggestion for a drug + condition pair."""
+    """Get structured dosing suggestion for a drug + condition pair."""
+    import re as _re
+
     try:
         async with app.state.pool.acquire() as conn:
             # Look up medicine with condition-specific dosing
@@ -343,6 +421,7 @@ async def suggest_dosing(request: DosingRequest):
                 SELECT m.name, m.adult_dose, m.adult_frequency, m.adult_duration,
                        m.paediatric_dose_mg_per_kg, m.paediatric_frequency,
                        m.contraindications, m.pregnancy_safe, m.pregnancy_notes,
+                       m.routes,
                        cm.dose_context, cm.treatment_line, cm.age_group, cm.special_notes
                 FROM medicines m
                 LEFT JOIN condition_medicines cm ON cm.medicine_id = m.id
@@ -353,23 +432,65 @@ async def suggest_dosing(request: DosingRequest):
             """, f"%{request.drugName}%", f"%{request.conditionName}%")
 
         if dosing:
-            # Build structured suggestion from DB
-            parts = [f"**{dosing['name'].title()}**"]
-            if dosing["dose_context"]:
-                parts.append(f"Dose: {dosing['dose_context']}")
-            elif dosing["adult_dose"]:
-                freq = dosing["adult_frequency"] or ""
-                dur = dosing["adult_duration"] or ""
-                parts.append(f"Dose: {dosing['adult_dose']} {freq} {dur}".strip())
-            if dosing["treatment_line"]:
-                parts.append(f"({dosing['treatment_line'].replace('_', ' ')})")
+            # Build structured suggestion from DB fields
+            dose_text = dosing["dose_context"] or dosing["adult_dose"] or ""
+            freq_raw = dosing["adult_frequency"] or ""
+            dur_raw = dosing["adult_duration"] or ""
+
+            # Extract numeric dose_mg from dose text (e.g. "500mg" → 500, "1g" → 1000)
+            dose_mg = None
+            mg_match = _re.search(r"(\d+(?:\.\d+)?)\s*mg", dose_text, _re.IGNORECASE)
+            if mg_match:
+                dose_mg = float(mg_match.group(1))
+            else:
+                g_match = _re.search(r"(\d+(?:\.\d+)?)\s*g(?:\b|[^a-zA-Z])", dose_text, _re.IGNORECASE)
+                if g_match:
+                    dose_mg = float(g_match.group(1)) * 1000
+
+            # Map frequency text to standard abbreviations
+            freq_map = {
+                "once daily": "od", "daily": "od", "od": "od",
+                "twice daily": "bd", "bd": "bd", "12-hourly": "bd", "12 hourly": "bd",
+                "three times daily": "tds", "tds": "tds", "8-hourly": "tds", "8 hourly": "tds",
+                "four times daily": "qds", "qds": "qds", "6-hourly": "qds", "6 hourly": "qds",
+                "as needed": "prn", "prn": "prn", "stat": "stat",
+            }
+            frequency = freq_map.get(freq_raw.lower().strip(), freq_raw) if freq_raw else ""
+
+            # Extract duration days
+            duration_days = None
+            if dur_raw:
+                dur_match = _re.search(r"(\d+)", dur_raw)
+                if dur_match:
+                    duration_days = int(dur_match.group(1))
+
+            # Route
+            routes = dosing.get("routes") or []
+            route = routes[0] if routes else "oral"
+
+            # Clinical note
+            clinical_notes = []
             if dosing["special_notes"]:
-                parts.append(f"Note: {dosing['special_notes']}")
+                clinical_notes.append(dosing["special_notes"])
             if request.patientAge and request.patientAge < 18 and dosing["paediatric_dose_mg_per_kg"]:
-                parts.append(f"Paediatric: {dosing['paediatric_dose_mg_per_kg']} mg/kg")
+                clinical_notes.append(f"Paediatric: {dosing['paediatric_dose_mg_per_kg']} mg/kg")
             if dosing["pregnancy_safe"] is False:
-                parts.append("**WARNING: Not safe in pregnancy**")
-            return {"suggestion": " | ".join(parts)}
+                clinical_notes.append("WARNING: Not safe in pregnancy")
+            clinical_note = ". ".join(clinical_notes) if clinical_notes else ""
+
+            suggestion = {
+                "dose": dose_text,
+                "dose_mg": dose_mg,
+                "frequency": frequency,
+                "duration_days": duration_days,
+                "formulation": "",
+                "route": route,
+                "confidence": "high",
+                "clinical_note": clinical_note,
+                "source_quote": dosing["dose_context"] or dosing["adult_dose"] or "",
+                "treatment_line": (dosing["treatment_line"] or "").replace("_", " "),
+            }
+            return {"suggestion": suggestion}
 
         # Fallback: use Haiku with knowledge chunks
         async with app.state.pool.acquire() as conn:
@@ -387,20 +508,382 @@ async def suggest_dosing(request: DosingRequest):
 
         response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
+            max_tokens=512,
             temperature=0,
             messages=[{"role": "user", "content": (
-                f"From the STG text below, provide dosing for {request.drugName} "
+                f"From the STG text below, extract dosing for {request.drugName} "
                 f"for {request.conditionName}.\n"
                 f"Patient: age={request.patientAge}, sex={request.patientSex}\n\n"
                 f"STG text:\n{context}\n\n"
-                f"Provide a concise dosing recommendation. If the drug is not found in the text, say so."
+                f"Return ONLY valid JSON (no markdown fences):\n"
+                f'{{"dose": "e.g. 500mg", "dose_mg": 500, "frequency": "tds", '
+                f'"duration_days": 5, "route": "oral", "clinical_note": "...", '
+                f'"source_quote": "exact quote from text"}}\n'
+                f"If the drug is not found, return: "
+                f'{{"dose": "", "dose_mg": null, "frequency": "", "duration_days": null, '
+                f'"route": "", "clinical_note": "Drug not found in STG for this condition", '
+                f'"source_quote": ""}}'
             )}],
         )
-        return {"suggestion": response.content[0].text}
+
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        try:
+            parsed = json.loads(text)
+            parsed["confidence"] = "medium"
+            parsed.setdefault("formulation", "")
+            parsed.setdefault("treatment_line", "")
+            return {"suggestion": parsed}
+        except json.JSONDecodeError:
+            # Final fallback: return as text in clinical_note
+            return {"suggestion": {
+                "dose": "", "dose_mg": None, "frequency": "", "duration_days": None,
+                "formulation": "", "route": "", "confidence": "low",
+                "clinical_note": text[:500], "source_quote": "", "treatment_line": "",
+            }}
 
     except Exception as e:
         logger.error(f"Dosing suggestion failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Encounter Agent — Clinical Documentation ──────────────────────────────
+
+@app.post("/api/encounter/generate-soap")
+async def encounter_generate_soap(request: GenerateSOAPRequest):
+    """Generate an STG-grounded SOAP note from encounter data."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            result = await generate_soap_note(
+                conn,
+                condition_name=request.condition_name,
+                condition_code=request.condition_code,
+                patient=request.patient,
+                chief_complaint=request.chief_complaint,
+                collected_data=request.collected_data,
+                prescriptions=request.prescriptions,
+                triage_context=request.triage_context,
+            )
+        return result
+    except Exception as e:
+        logger.error(f"SOAP generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/encounter/generate-care-plan")
+async def encounter_generate_care_plan(request: GenerateCarePlanRequest):
+    """Generate a patient-facing care plan grounded in STG."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            result = await generate_care_plan(
+                conn,
+                condition_name=request.condition_name,
+                condition_code=request.condition_code,
+                patient=request.patient,
+                prescriptions=request.prescriptions,
+                language=request.language,
+            )
+        return result
+    except Exception as e:
+        logger.error(f"Care plan generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/encounter/generate-discharge-summary")
+async def encounter_generate_discharge(request: GenerateDischargeRequest):
+    """Generate a clinician-facing discharge summary."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            result = await generate_discharge_summary(
+                conn,
+                condition_name=request.condition_name,
+                condition_code=request.condition_code,
+                patient=request.patient,
+                prescriptions=request.prescriptions,
+                collected_data=request.collected_data,
+                triage_context=request.triage_context,
+                soap_note=request.soap_note,
+            )
+        return result
+    except Exception as e:
+        logger.error(f"Discharge summary generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── POST /api/encounter/clinical-opportunities ────────────────────────────
+
+@app.post("/api/encounter/clinical-opportunities")
+async def get_clinical_opportunities(request: dict):
+    """Evaluate proactive clinical opportunities for the current encounter.
+
+    Deterministic rules engine — no DB calls, no LLM calls.
+    Surfaces: screening reminders, diagnosis-triggered workups,
+    incidental vitals findings, SDOH programs, medication safety.
+    """
+    from agents.opportunities import ClinicalOpportunitiesEngine
+
+    try:
+        engine = ClinicalOpportunitiesEngine()
+        opportunities = engine.evaluate(
+            patient_age=request.get("patient_age"),
+            patient_sex=request.get("patient_sex"),
+            pregnancy_status=request.get("pregnancy_status"),
+            confirmed_diagnosis=request.get("confirmed_diagnosis"),
+            diagnosis_stg_code=request.get("diagnosis_stg_code"),
+            vitals=request.get("vitals"),
+            prescriptions=request.get("prescriptions", []),
+            extracted_symptoms=request.get("extracted_symptoms", []),
+        )
+        return {"opportunities": opportunities}
+    except Exception as e:
+        logger.error(f"Clinical opportunities failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── POST /api/guidelines/lookup ────────────────────────────────────────────
+
+@app.post("/api/guidelines/lookup")
+async def guidelines_lookup(request: GuidelinesLookupRequest):
+    """Look up STG guideline sections for a condition — structured + raw fallback."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            # Find condition with all text fields
+            condition = await conn.fetchrow("""
+                SELECT id, name, stg_code, description_text, general_measures,
+                       medicine_treatment, danger_signs, referral_criteria
+                FROM conditions WHERE name ILIKE $1 LIMIT 1
+            """, f"%{request.condition_name}%")
+            if not condition:
+                return {"condition_name": request.condition_name, "sections": [], "structured": None}
+
+            cond_id = condition["id"]
+
+            # ── Build structured data ──
+
+            # 1. Parse description
+            desc_raw = condition["description_text"] or ""
+            desc_summary = desc_raw[:300].rsplit(".", 1)[0] + "." if len(desc_raw) > 300 and "." in desc_raw[:300] else desc_raw
+
+            # 2. Parse general measures
+            gm_raw = condition["general_measures"] or ""
+            gm_summary = gm_raw[:300].rsplit(".", 1)[0] + "." if len(gm_raw) > 300 and "." in gm_raw[:300] else gm_raw
+
+            # 3. Parse danger signs → array of strings
+            ds_raw = condition["danger_signs"] or ""
+            danger_signs = _parse_bullet_list(ds_raw)
+
+            # 4. Parse referral criteria → array of strings
+            ref_raw = condition["referral_criteria"]
+            referral_criteria = []
+            if ref_raw:
+                if isinstance(ref_raw, str):
+                    try:
+                        referral_criteria = json.loads(ref_raw)
+                    except (json.JSONDecodeError, TypeError):
+                        referral_criteria = _parse_bullet_list(ref_raw)
+                elif isinstance(ref_raw, list):
+                    referral_criteria = ref_raw
+
+            # 5. Structured medicines from condition_medicines
+            med_rows = await conn.fetch("""
+                SELECT m.name, m.routes, m.adult_dose, m.adult_frequency, m.adult_duration,
+                       m.paediatric_dose_mg_per_kg, m.paediatric_frequency,
+                       m.pregnancy_safe, m.schedule,
+                       cm.treatment_line, cm.dose_context, cm.special_notes
+                FROM condition_medicines cm
+                JOIN medicines m ON m.id = cm.medicine_id
+                WHERE cm.condition_id = $1
+                ORDER BY
+                    CASE cm.treatment_line
+                        WHEN 'first_line' THEN 1
+                        WHEN 'second_line' THEN 2
+                        WHEN 'alternative' THEN 3
+                        WHEN 'adjunct' THEN 4
+                        ELSE 5
+                    END, m.name
+            """, cond_id)
+
+            medicines = []
+            for m in med_rows:
+                med = {
+                    "name": m["name"],
+                    "treatment_line": m["treatment_line"] or "first_line",
+                    "dose": m["dose_context"] or m["adult_dose"] or "",
+                    "special_notes": m["special_notes"] or "",
+                }
+                if request.patient_age and request.patient_age < 18 and m["paediatric_dose_mg_per_kg"]:
+                    med["dose"] = f"{m['paediatric_dose_mg_per_kg']} mg/kg {m['paediatric_frequency'] or ''}"
+                medicines.append(med)
+
+            # 6. Clinical tables & algorithms
+            table_rows = await conn.fetch("""
+                SELECT section_role, chunk_text, is_table, is_algorithm
+                FROM knowledge_chunks
+                WHERE condition_id = $1
+                  AND (is_table = true OR is_algorithm = true)
+                ORDER BY is_algorithm DESC, length(chunk_text) ASC
+                LIMIT 4
+            """, cond_id)
+
+            clinical_tables = []
+            for t in table_rows:
+                text = t["chunk_text"] or ""
+                if len(text) < 30:
+                    continue
+                ttype = "algorithm" if t["is_algorithm"] else "table"
+                # Extract first line as title
+                first_line = text.split("\n", 1)[0].strip()
+                title = first_line if len(first_line) < 80 else ""
+                clinical_tables.append({
+                    "title": title,
+                    "content": text,
+                    "type": ttype,
+                })
+
+            structured = {
+                "stg_code": condition["stg_code"],
+                "description": desc_summary,
+                "description_full": desc_raw if len(desc_raw) > len(desc_summary) + 20 else None,
+                "general_measures": gm_summary,
+                "general_measures_full": gm_raw if len(gm_raw) > len(gm_summary) + 20 else None,
+                "medicines": medicines,
+                "danger_signs": danger_signs,
+                "referral_criteria": referral_criteria,
+                "clinical_tables": clinical_tables,
+            }
+
+            # ── Raw sections fallback (kept for compatibility) ──
+            rows = await conn.fetch("""
+                SELECT section_role, chunk_text
+                FROM knowledge_chunks
+                WHERE condition_id = $1
+                  AND NOT (section_role = 'DOSING_TABLE' AND is_table = true)
+                  AND section_role != 'CLINICAL_PRESENTATION'
+                ORDER BY
+                    CASE section_role
+                        WHEN 'MANAGEMENT' THEN 1
+                        WHEN 'DOSING_TABLE' THEN 2
+                        WHEN 'DANGER_SIGNS' THEN 3
+                        WHEN 'REFERRAL' THEN 4
+                    END
+            """, cond_id)
+
+            heading_map = {
+                "MANAGEMENT": "General Measures",
+                "DOSING_TABLE": "Medicine Treatment",
+                "DANGER_SIGNS": "Danger Signs",
+                "REFERRAL": "Referral Criteria",
+            }
+            sections = []
+            for r in rows:
+                text = r["chunk_text"]
+                if not text or len(text) < 30:
+                    continue
+                sections.append({
+                    "heading": heading_map.get(r["section_role"], r["section_role"]),
+                    "section_ref": condition["stg_code"],
+                    "body": text,
+                    "source_name": "SA PHC STG 2024 8th Edition",
+                })
+
+        return {
+            "condition_name": condition["name"],
+            "condition_code": condition["stg_code"],
+            "structured": structured,
+            "sections": sections,
+        }
+
+    except Exception as e:
+        logger.error(f"Guidelines lookup failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _parse_bullet_list(raw: str) -> list[str]:
+    """Parse raw STG text into a list of individual items."""
+    if not raw or not raw.strip():
+        return []
+    import re
+    text = re.sub(r"\s*LoE:\s*[A-Za-z0-9]+", "", raw.strip())
+    text = re.sub(r"^[»►•●]\s*", "- ", text, flags=re.MULTILINE)
+    text = re.sub(r"^[–—]\s+", "- ", text, flags=re.MULTILINE)
+    text = re.sub(r"^\d+[.)]\s+", "- ", text, flags=re.MULTILINE)
+    items = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        if line and len(line) > 3:
+            items.append(line)
+    return items
+
+
+# ── POST /api/prescribing/recommended-drugs ────────────────────────────────
+
+@app.post("/api/prescribing/recommended-drugs")
+async def recommended_drugs(request: RecommendedDrugsRequest):
+    """Get STG-recommended medicines for a condition, ordered by treatment line."""
+    try:
+        async with app.state.pool.acquire() as conn:
+            condition = await conn.fetchrow(
+                "SELECT id, name, stg_code FROM conditions WHERE name ILIKE $1 LIMIT 1",
+                f"%{request.condition_name}%",
+            )
+            if not condition:
+                return {"condition_name": request.condition_name, "drugs": []}
+
+            rows = await conn.fetch("""
+                SELECT m.name, m.routes, m.adult_dose, m.adult_frequency, m.adult_duration,
+                       m.paediatric_dose_mg_per_kg, m.paediatric_frequency,
+                       m.pregnancy_safe, m.schedule,
+                       cm.treatment_line, cm.dose_context, cm.age_group, cm.special_notes
+                FROM condition_medicines cm
+                JOIN medicines m ON m.id = cm.medicine_id
+                WHERE cm.condition_id = $1
+                ORDER BY
+                    CASE cm.treatment_line
+                        WHEN 'first_line' THEN 1
+                        WHEN 'second_line' THEN 2
+                        WHEN 'alternative' THEN 3
+                        WHEN 'adjunct' THEN 4
+                        ELSE 5
+                    END,
+                    m.name
+            """, condition["id"])
+
+            drugs = []
+            for r in rows:
+                routes = r["routes"] or []
+                drug = {
+                    "name": r["name"],
+                    "route": routes[0] if routes else "oral",
+                    "routes": routes,
+                    "treatment_line": r["treatment_line"] or "first_line",
+                    "dose_context": r["dose_context"] or "",
+                    "adult_dose": r["adult_dose"] or "",
+                    "adult_frequency": r["adult_frequency"] or "",
+                    "adult_duration": r["adult_duration"] or "",
+                    "age_group": r["age_group"] or "all",
+                    "special_notes": r["special_notes"] or "",
+                    "pregnancy_safe": r["pregnancy_safe"],
+                    "schedule": r["schedule"],
+                }
+                # Add paediatric dosing if patient is a child
+                if request.patient_age and request.patient_age < 18:
+                    drug["paediatric_dose_mg_per_kg"] = r["paediatric_dose_mg_per_kg"]
+                    drug["paediatric_frequency"] = r["paediatric_frequency"] or ""
+                drugs.append(drug)
+
+        return {
+            "condition_name": condition["name"],
+            "condition_code": condition["stg_code"],
+            "drugs": drugs,
+        }
+
+    except Exception as e:
+        logger.error(f"Recommended drugs failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

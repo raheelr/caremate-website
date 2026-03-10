@@ -171,15 +171,15 @@ def extraction_path(stg_code: str) -> str:
 
 
 def extraction_exists(stg_code: str) -> bool:
-    """Check if an extraction JSON already exists on disk."""
+    """Check if an extraction JSON already exists on disk and is not a failed extraction."""
     path = extraction_path(stg_code)
     if not os.path.exists(path):
         return False
-    # Also verify it's valid JSON and not empty
+    # Also verify it's valid JSON, not empty, and not a failed extraction
     try:
         with open(path) as f:
             data = json.load(f)
-        return bool(data.get('stg_code'))
+        return bool(data.get('stg_code')) and not data.get('_extraction_failed')
     except (json.JSONDecodeError, KeyError):
         return False
 
@@ -423,6 +423,24 @@ def run_phase_a(
 
     if error_count > 0:
         log(f"\n  To retry failed conditions, run again with --resume")
+
+    # ── Manifest verification: check every segmented condition has an extraction ──
+    expected_codes = {m.stg_code for m in merged_inputs}
+    on_disk_codes = set(list_all_extractions())
+    # Also filter out failed extractions from on_disk_codes
+    valid_codes = set()
+    for code in on_disk_codes:
+        if extraction_exists(code):
+            valid_codes.add(code)
+    missing_codes = expected_codes - valid_codes
+    if missing_codes:
+        log(f"\n  WARNING: {len(missing_codes)} conditions segmented but NOT extracted:")
+        for code in sorted(missing_codes):
+            log(f"    - {code}")
+        log(f"\n  To extract just these, run:")
+        log(f"    python3 ingestion/pipeline.py --pdf {pdf_path} --stg-codes '{','.join(sorted(missing_codes))}' --skip-docling --skip-vision")
+    else:
+        log(f"  Manifest check: ALL {len(expected_codes)} segmented conditions have valid extractions")
 
     return total_on_disk
 

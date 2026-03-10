@@ -388,10 +388,25 @@ Return ONLY valid JSON:
 class TriageAgent:
 
     def __init__(self, pool: asyncpg.Pool):
-        self.client = anthropic.AsyncAnthropic()
+        self.client = anthropic.AsyncAnthropic(max_retries=3)
         self.pool = pool
         self.haiku = "claude-haiku-4-5-20251001"
         self.sonnet = "claude-sonnet-4-6"
+        self._fallback_models = [self.haiku, "claude-sonnet-4-5-20250929"]
+
+    async def _call_with_fallback(self, **kwargs) -> anthropic.types.Message:
+        """Try each model in order; fall back on 429/529 errors."""
+        last_err = None
+        for model in self._fallback_models:
+            try:
+                return await self.client.messages.create(model=model, **kwargs)
+            except anthropic.APIStatusError as e:
+                if e.status_code in (429, 529):
+                    logger.warning(f"{model} unavailable ({e.status_code}), trying fallback")
+                    last_err = e
+                    continue
+                raise
+        raise last_err
 
     # ── Main analyse endpoint ────────────────────────────────────────────────
 
@@ -453,8 +468,7 @@ class TriageAgent:
         )
 
         try:
-            extract_response = await self.client.messages.create(
-                model=self.haiku,
+            extract_response = await self._call_with_fallback(
                 max_tokens=512,
                 temperature=0,
                 messages=[{"role": "user", "content": extract_prompt}],
@@ -936,8 +950,7 @@ class TriageAgent:
         )
 
         try:
-            response = await self.client.messages.create(
-                model=self.haiku,
+            response = await self._call_with_fallback(
                 max_tokens=4096,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
@@ -1005,8 +1018,7 @@ class TriageAgent:
         )
 
         try:
-            response = await self.client.messages.create(
-                model=self.haiku,
+            response = await self._call_with_fallback(
                 max_tokens=256,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
@@ -1356,8 +1368,7 @@ class TriageAgent:
         )
 
         try:
-            response = await self.client.messages.create(
-                model=self.haiku,
+            response = await self._call_with_fallback(
                 max_tokens=4096,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
@@ -1583,14 +1594,23 @@ class TriageAgent:
                 if base and base not in clean_feats:
                     clean_feats.append(base)
 
-            conditions.append({
+            cond_entry = {
                 "condition_code": code,
                 "condition_name": s.get("name", ""),
                 "confidence": confidence,
                 "matched_symptoms": clean_feats,
                 "reasoning": "Matched via STG knowledge graph",
                 "source_references": [f"STG {code}"] if code else [],
-            })
+            }
+
+            # Propagate care-setting fields for referral-only conditions
+            if s.get("referral_required"):
+                cond_entry["referral_required"] = True
+                cond_entry["care_setting"] = s.get("care_setting", "hospital")
+                cond_entry["source_tag"] = s.get("source_tag", "")
+                cond_entry["reasoning"] = "REFER — identified via knowledge graph, requires higher-level care"
+
+            conditions.append(cond_entry)
 
         result = {
             "extracted_symptoms": symptoms,
@@ -1622,10 +1642,13 @@ class TriageAgent:
     ) -> dict:
         """Generate condition_symptoms from DB clinical features.
 
-        For each condition (top 5), produce 3-4 verification questions from:
+        For each condition (top 5), produce all verification questions from:
         1. RED_FLAG features (highest priority — determines urgency)
         2. diagnostic_feature not already in complaint (distinguishing)
         3. presenting_feature not already in complaint (confirming)
+
+        Returns all features with metadata (is_red_flag, source_citation, grounding)
+        so the frontend can render red flag badges and section role indicators.
         """
         condition_symptoms: dict[str, list[dict]] = {}
         reported_lower = {s.lower() for s in reported_symptoms}
@@ -1661,13 +1684,15 @@ class TriageAgent:
                 question_text = self._feature_to_question(
                     feat_name, feat["relationship_type"]
                 )
+                is_red_flag = feat["relationship_type"] == "RED_FLAG"
+                section_role = "danger_signs" if is_red_flag else feat.get("feature_type", "unknown")
                 questions.append({
                     "id": f"cs_{code.replace('.', '_')}_{q_idx}",
                     "question": question_text,
+                    "is_red_flag": is_red_flag,
+                    "source_citation": f"graph:{code}:{feat_name}:{section_role}",
+                    "grounding": "verified",
                 })
-
-                if len(questions) >= 4:
-                    break
 
             if questions:
                 condition_symptoms[name] = questions
@@ -1717,8 +1742,7 @@ class TriageAgent:
         )
 
         try:
-            response = await self.client.messages.create(
-                model=self.haiku,
+            response = await self._call_with_fallback(
                 max_tokens=512,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
