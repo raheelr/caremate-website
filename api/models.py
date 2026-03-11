@@ -30,6 +30,12 @@ class CoreHistory(BaseModel):
     medications: Optional[str] = None            # free text
 
 
+class LabResult(BaseModel):
+    test_name: str                               # e.g. "hiv", "rpr", "genexpert", "hba1c"
+    result: str                                  # e.g. "positive", "reactive", "7.2"
+    date: Optional[str] = None                   # ISO date, for EMR historical data
+
+
 class ConditionResult(BaseModel):
     condition_code: str                          # stg_code e.g. "1.2"
     condition_name: str
@@ -61,6 +67,7 @@ class AnalyzeRequest(BaseModel):
     patient: Optional[PatientContext] = None
     core_history: Optional[CoreHistory] = None
     vitals: Optional[Vitals] = None
+    lab_results: Optional[list[LabResult]] = None  # Structured lab input (EMR-ready)
 
 
 class AnalyzeResponse(BaseModel):
@@ -296,3 +303,16 @@ class SubmitResponseRequest(BaseModel):
     red_flags_identified: list[str] = []
     notes: Optional[str] = None
     time_taken_seconds: Optional[int] = None
+
+
+# ── POST /api/prescriptions/safety-check ─────────────────────────────────────
+
+class PrescriptionSafetyRequest(BaseModel):
+    prescriptions: list[dict] = []             # [{name, dose, frequency, duration}]
+    patient_age: Optional[int] = None
+    patient_sex: Optional[str] = None
+    pregnancy_status: Optional[str] = None     # "pregnant" | "not_pregnant" | "unknown"
+    allergies: Optional[str] = None            # comma-separated or single allergy
+    current_medications: list[str] = []        # existing meds (not in prescriptions list)
+    confirmed_diagnosis: Optional[str] = None  # for recommended drug lookup
+    recommended_drugs: list[dict] = []         # [{name, treatment_line}] STG formulary drugs

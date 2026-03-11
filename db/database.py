@@ -488,6 +488,7 @@ async def get_conditions_for_symptoms(
             c.referral_required,
             c.care_setting,
             c.source_tag,
+            c.duration_profile,
             COUNT(DISTINCT cr.id) as match_count,
             SUM(CASE
                 WHEN cr.feature_type = 'diagnostic_feature' THEN 0.18
@@ -507,7 +508,7 @@ async def get_conditions_for_symptoms(
              OR ($5 = 'female' AND c.applies_to_female IS NOT FALSE))
         AND ($6::int IS NULL OR (c.min_age_years <= $6 AND c.max_age_years >= $6))
         GROUP BY c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence,
-                 c.referral_required, c.care_setting, c.source_tag
+                 c.referral_required, c.care_setting, c.source_tag, c.duration_profile
         ORDER BY raw_score DESC
         LIMIT $4
     """, symptom_names, patient_is_child, patient_is_pregnant, limit,
@@ -880,7 +881,7 @@ async def get_vitals_mappings(
         # Query all matching thresholds for this vital
         rows = await conn.fetch("""
             SELECT vm.*, c.stg_code, c.name as condition_name,
-                   c.chapter_name, c.extraction_confidence
+                   c.chapter_name, c.extraction_confidence, c.duration_profile
             FROM vitals_condition_mapping vm
             JOIN conditions c ON c.id = vm.condition_id
             WHERE vm.vital_name = $1
@@ -921,7 +922,7 @@ async def vector_search_conditions(
 
     rows = await conn.fetch("""
         SELECT c.id, c.stg_code, c.name, c.chapter_name, c.extraction_confidence,
-               kc.section_role,
+               c.duration_profile, kc.section_role,
                1 - (kc.embedding <=> $1::vector) as similarity
         FROM knowledge_chunks kc
         JOIN conditions c ON c.id = kc.condition_id
@@ -948,6 +949,7 @@ async def vector_search_conditions(
                 "name": r["name"],
                 "chapter_name": r["chapter_name"],
                 "extraction_confidence": float(r["extraction_confidence"] or 1.0),
+                "duration_profile": r["duration_profile"],
                 "similarity": sim,
                 "best_section": r["section_role"],
             }

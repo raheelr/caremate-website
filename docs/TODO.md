@@ -8,8 +8,8 @@
 ## EVAH RFP (Deadline: April 1, 2026)
 
 ### Submissions & Deadlines
-- [ ] Submit 5 clarifying questions to evah@povertyactionlab.org (due **March 6** — OVERDUE)
-- [ ] Finalize and submit full Pathway A application (due **April 1, 10am EDT**)
+- [x] Submit 5 clarifying questions to evah@povertyactionlab.org (due March 6) — DONE
+- [ ] Finalize and submit full Pathway A application (due **April 1, 10am EDT**) — **~50% drafted**
 
 ### Partners & Eligibility
 - [ ] Secure SA-based lead applicant entity (Dr Tasleem's institution or SA university)
@@ -96,7 +96,7 @@
 - [x] Multi-language care plans — 11 SA official languages at Grade 8 literacy (en, zu, xh, af, nso, tn, st, ts, ss, ve, nr)
 - [x] Print-ready care plans — formatted for printing with clinician/patient signature lines
 - [x] Clinical Assistant — 9-tool agentic loop (guidelines, conditions, red flags, meds, drug safety, alternatives, referral drafting, condition search, KB search)
-- [x] Clinical Opportunities Engine — 25 deterministic rules (screening, dx-workups, vitals, SDOH, med safety)
+- [x] Clinical Opportunities Engine — 27 deterministic rules (screening, dx-workups, vitals, SDOH, med safety)
 - [x] Encounter Agent — SOAP note, care plan, discharge summary generation (all STG-grounded)
 - [x] Referral letter generation — Clinical Assistant drafts referral letters with encounter context, asks for referral reason
 - [x] Proactive referral triggers — eGFR <45, HbA1c >10, resistant hypertension flagged (fixed live during March 7 demo)
@@ -118,10 +118,26 @@
 - [x] Deep test updates — updated STG codes after dedup, added `alt_codes` support, added measles test case (2026-03-10)
 - [x] Pipeline manifest verification — warns on missing extractions, suggests retry command (2026-03-10)
 - [x] Prevalence tiers expanded — added pneumonia child variants, CCF, CKD (2026-03-10)
+- [x] Proactive context awareness — Clinical Assistant now automatically uses ALL patient context (pregnancy, allergies, vitals, meds, age, sex, chronic conditions) without being asked (2026-03-10)
+- [x] Context propagation fix — pregnancy/vitals/allergies/meds from triage now flow to Clinical Assistant via API normalization (2026-03-10)
+- [x] Pregnancy safety data — 159/337 medicines (47%) populated with `pregnancy_safe` + `pregnancy_notes` (was 0%). Includes ARVs, TB drugs, insulin, top 30 drugs (2026-03-10)
+- [x] Rifampicin + OCP interaction — CYP450 induction reduces oral contraceptive efficacy. Added to Opportunities Engine + Clinical Assistant (2026-03-10)
+- [x] NSAID in pregnancy rule — added to Opportunities Engine as urgent safety alert (2026-03-10)
+- [x] Drug interaction sets — `CYP450_INDUCERS`, `ORAL_CONTRACEPTIVES` exported from `opportunities.py`, imported by Clinical Assistant (2026-03-10)
+- [x] Competitive landscape analysis — `docs/COMPETITIVE_LANDSCAPE.md` + Word doc `docs/CareMate_Competitive_Landscape.docx` (2026-03-10)
+- [x] Proactive Prescription Safety Checker — `agents/prescription_safety.py`: deterministic batch safety checking (no LLM), endpoint `POST /api/prescriptions/safety-check`, frontend hook + PrescribeTab inline alerts + summary banner + formulary "Contraindicated" badges + "Ask CareMate for alternatives" auto-chat (2026-03-11)
+- [x] Generic allergy matching — 2-phase: direct name match (any allergy) + 8 cross-reactivity classes (penicillins, cephalosporins, sulfonamides, macrolides, tetracyclines, fluoroquinolones, statins, opioids, NSAIDs) (2026-03-11)
+- [x] Drug interaction rules expanded — 17 pairs (was 5): added methotrexate+NSAID, methotrexate+co-trimoxazole, lithium+ACE/NSAID, SSRI+tramadol, digoxin+amiodarone/verapamil, theophylline+ciprofloxacin, phenytoin+fluconazole, carbamazepine+macrolide, valproate+carbamazepine (2026-03-11)
+- [x] Pregnancy-unsafe drug classes expanded — 40+ drugs in-memory: added tetracyclines, fluoroquinolones, statins, anticonvulsants, lithium, misoprostol, sulfonylureas, chloramphenicol (2026-03-11)
+- [x] Pregnancy safety data expanded — 281/337 (83%, was 47%). 215 safe, 66 unsafe. Remaining 56 are non-prescribable entries (2026-03-11)
+- [x] Single source of truth for safety rules — `INTERACTION_RULES` + `PREGNANCY_UNSAFE_CLASSES` defined in `prescription_safety.py`, imported by `clinical_assistant.py` (2026-03-11)
+- [x] Demo walkthrough updated — 18 new screenshots from Emma Triage 2, 11 steps including proactive safety alerts + Ask CareMate auto-chat (2026-03-11)
 
 ### Tier 2 (High Value, Near-Term)
 - [ ] Care setting context switch — `care_setting` parameter (primary/hospital/emergency) filtering knowledge corpus
 - [ ] Per-province prevalence granularity (Western Cape vs KZN vs Limpopo)
+- [ ] Populate contraindications + paediatric dosing columns in medicines table (currently 0% populated)
+- [ ] Add `breastfeeding_safe` column to medicines table (not yet created)
 - [ ] SOAP note quality improvement — Numaan: "needs a little more clinical detail" (compare against existing systems)
 - [ ] South African Medicine Formulary integration — Tasleem suggested adding SAMF for deeper drug knowledge
 
@@ -232,4 +248,4 @@
 
 ---
 
-*Last updated: 2026-03-08*
+*Last updated: 2026-03-11*

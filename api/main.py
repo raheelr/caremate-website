@@ -58,10 +58,12 @@ from api.models import (
     RecommendedDrugsRequest,
     CreateVignetteRequest,
     SubmitResponseRequest,
+    PrescriptionSafetyRequest,
 )
 from agents.triage_agent import TriageAgent
 from agents.clinical_assistant import ClinicalAssistant
 from agents.encounter_agent import generate_soap_note, generate_care_plan, generate_discharge_summary
+from agents.prescription_safety import batch_check_prescription_safety
 from safety.checker import SafetyChecker
 from db.database import (
     get_condition_detail, get_condition_by_stg_code, search_knowledge_chunks,
@@ -154,7 +156,7 @@ async def health():
     try:
         async with app.state.pool.acquire() as conn:
             count = await conn.fetchval("SELECT COUNT(*) FROM conditions")
-        return {"status": "healthy", "conditions_loaded": count}
+        return {"status": "healthy", "conditions_loaded": count, "version": "2026-03-10-v11"}
     except Exception as e:
         return {"status": "degraded", "error": str(e)}
 
@@ -169,6 +171,7 @@ async def analyze_complaint(request: AnalyzeRequest):
         patient = request.patient.model_dump(exclude_none=True) if request.patient else None
         vitals = request.vitals.model_dump(exclude_none=True) if request.vitals else None
         core_history = request.core_history.model_dump(exclude_none=True) if request.core_history else None
+        lab_results = [lr.model_dump() for lr in request.lab_results] if request.lab_results else None
 
         # Run triage agent (includes safety review internally, parallelized)
         result = await app.state.agent.analyze(
@@ -176,6 +179,7 @@ async def analyze_complaint(request: AnalyzeRequest):
             patient=patient,
             vitals=vitals,
             core_history=core_history,
+            lab_results=lab_results,
         )
 
         return result
@@ -364,11 +368,99 @@ async def assistant_chat(request: AssistantChatRequest):
                 conn, conversation_id, "user", request.message,
             )
 
+        # Normalize encounter context — propagate patient info from triage
+        enc_ctx = request.encounter_context
+        if enc_ctx:
+            # Debug: log what we received
+            _patient_debug = enc_ctx.get("patient", {})
+            _preg_debug = _patient_debug.get("pregnancy_status") if isinstance(_patient_debug, dict) else None
+            logger.info(f"[ASSISTANT] encounter_context.patient={_patient_debug}, pregnancy_status={_preg_debug}")
+            logger.info(f"[ASSISTANT] encounter_context keys={list(enc_ctx.keys())}")
+            patient = enc_ctx.get("patient") or {}
+            if not isinstance(patient, dict):
+                patient = {}
+
+            # Search triage_results for patient context
+            triage = enc_ctx.get("triage_results") or enc_ctx.get("triage") or {}
+            if isinstance(triage, dict):
+                tp = triage.get("patient") or {}
+                if isinstance(tp, dict):
+                    # Propagate pregnancy_status
+                    if not patient.get("pregnancy_status") and tp.get("pregnancy_status"):
+                        patient["pregnancy_status"] = tp["pregnancy_status"]
+                    # Propagate age/sex if missing
+                    if not patient.get("age") and tp.get("age"):
+                        patient["age"] = tp["age"]
+                    if not patient.get("sex") and tp.get("sex"):
+                        patient["sex"] = tp["sex"]
+
+            # Also check triage_context (full triage object from encounter record)
+            triage_ctx = enc_ctx.get("triage_context") or {}
+            if isinstance(triage_ctx, dict):
+                tcp = triage_ctx.get("patient") or {}
+                if isinstance(tcp, dict):
+                    if not patient.get("pregnancy_status") and tcp.get("pregnancy_status"):
+                        patient["pregnancy_status"] = tcp["pregnancy_status"]
+                    if not patient.get("age") and tcp.get("age"):
+                        patient["age"] = tcp["age"]
+                    if not patient.get("sex") and tcp.get("sex"):
+                        patient["sex"] = tcp["sex"]
+                # Also top-level pregnancy_status in triage_context
+                if not patient.get("pregnancy_status") and triage_ctx.get("pregnancy_status"):
+                    patient["pregnancy_status"] = triage_ctx["pregnancy_status"]
+
+            # Check top-level fields
+            for field in ("pregnancy_status", "age", "sex"):
+                if not patient.get(field) and enc_ctx.get(field):
+                    patient[field] = enc_ctx[field]
+
+            enc_ctx["patient"] = patient
+
+            # Propagate vitals from triage if not already present
+            if not enc_ctx.get("vitals") and isinstance(triage, dict):
+                triage_vitals = triage.get("vitals")
+                if triage_vitals:
+                    enc_ctx["vitals"] = triage_vitals
+
+            # Propagate current_medications and allergies from core_history / history
+            history_data = enc_ctx.get("core_history") or enc_ctx.get("history") or {}
+            if not isinstance(history_data, dict):
+                history_data = {}
+
+            if not enc_ctx.get("current_medications"):
+                meds = history_data.get("medications") or history_data.get("current_medications")
+                if meds:
+                    enc_ctx["current_medications"] = meds
+                # Also check triage
+                if not enc_ctx.get("current_medications") and isinstance(triage, dict):
+                    core = triage.get("core_history") or triage.get("history") or {}
+                    if isinstance(core, dict):
+                        meds = core.get("medications") or core.get("current_medications")
+                        if meds:
+                            enc_ctx["current_medications"] = meds
+
+            # Propagate allergies from core_history
+            if not enc_ctx.get("allergies"):
+                allergies = history_data.get("allergies")
+                if allergies:
+                    enc_ctx["allergies"] = allergies
+                # Also check triage core_history
+                if not enc_ctx.get("allergies") and isinstance(triage, dict):
+                    core = triage.get("core_history") or triage.get("history") or {}
+                    if isinstance(core, dict) and core.get("allergies"):
+                        enc_ctx["allergies"] = core["allergies"]
+
+        # Debug: log final normalized context
+        if enc_ctx:
+            _final_patient = enc_ctx.get("patient", {})
+            logger.info(f"[ASSISTANT] FINAL patient={_final_patient}")
+            logger.info(f"[ASSISTANT] FINAL allergies={enc_ctx.get('allergies')}, current_meds={enc_ctx.get('current_medications')}")
+
         # Run the assistant agent
         result = await app.state.assistant.chat(
             message=request.message,
             conversation_history=history,
-            encounter_context=request.encounter_context,
+            encounter_context=enc_ctx,
         )
 
         # Save assistant response
@@ -383,12 +475,36 @@ async def assistant_chat(request: AssistantChatRequest):
                 tool_calls=result.get("tool_calls_detail"),
             )
 
+        # Temporary debug: show what context the backend received
+        debug_patient = enc_ctx.get("patient", {}) if enc_ctx else {}
+        from agents.clinical_assistant import _build_system_prompt, _extract_pregnancy_status
+        debug_preg = _extract_pregnancy_status(enc_ctx) if enc_ctx else None
+        debug_prompt = _build_system_prompt(enc_ctx)
+        # Extract just the CURRENT ENCOUNTER + CRITICAL FACTORS section
+        encounter_lines = []
+        for line in debug_prompt.split("\n"):
+            if "CURRENT ENCOUNTER" in line:
+                encounter_lines.append(line)
+            elif encounter_lines:
+                encounter_lines.append(line)
+                if ">>>" in line:
+                    break
+        debug_info = {
+            "pregnancy_status": debug_patient.get("pregnancy_status") if isinstance(debug_patient, dict) else None,
+            "pregnancy_extracted": debug_preg,
+            "sex": debug_patient.get("sex") if isinstance(debug_patient, dict) else None,
+            "allergies": enc_ctx.get("allergies") if enc_ctx else None,
+            "current_medications": enc_ctx.get("current_medications") if enc_ctx else None,
+            "system_prompt_encounter_section": "\n".join(encounter_lines),
+        }
+
         return {
             "conversation_id": conversation_id,
             "response": result["response"],
             "sources": result.get("sources", []),
             "tools_used": result.get("tools_used", []),
             "message_id": asst_msg_id,
+            "_debug_context": debug_info,
         }
 
     except anthropic.APIStatusError as e:
@@ -1066,4 +1182,38 @@ async def run_caremate_on_vignette(vignette_id: int):
         raise
     except Exception as e:
         logger.error(f"Run CareMate on vignette failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── POST /api/prescriptions/safety-check ─────────────────────────────────────
+
+@app.post("/api/prescriptions/safety-check")
+async def check_prescription_safety(request: PrescriptionSafetyRequest):
+    """Batch check prescriptions for safety issues against patient context.
+
+    Deterministic — no LLM. Checks pregnancy, allergies, drug interactions,
+    paediatric dosing, contraindications. Also pre-screens recommended STG
+    formulary drugs. Target: <100ms.
+    """
+    try:
+        patient_context = {
+            "age": request.patient_age,
+            "sex": request.patient_sex,
+            "pregnancy_status": request.pregnancy_status,
+            "allergies": request.allergies,
+            "current_medications": request.current_medications,
+        }
+
+        async with app.state.pool.acquire() as conn:
+            result = await batch_check_prescription_safety(
+                conn=conn,
+                prescriptions=request.prescriptions,
+                patient_context=patient_context,
+                recommended_drugs=request.recommended_drugs or None,
+            )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Prescription safety check failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

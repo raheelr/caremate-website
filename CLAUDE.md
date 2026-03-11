@@ -15,7 +15,7 @@ Clinical decision support tool for South African primary healthcare nurses. Matc
 - **caremate.co.za** — public landing page / marketing website (registered 2026-03-02)
 - **caremateai.health** — the live app (clinical tool)
 
-## Current System Status (as of 2026-03-10)
+## Current System Status (as of 2026-03-11)
 
 ### What's Built and Live
 - **Backend**: FastAPI on Railway (`https://caremate-api-production.up.railway.app`), healthy
@@ -23,11 +23,15 @@ Clinical decision support tool for South African primary healthcare nurses. Matc
 - **Database**: Supabase + pgvector, 350 conditions (335 STG primary + 15 referral-only), 12,150+ clinical edges, 1,532 knowledge chunks
 - **Triage Agent**: Full pipeline — extract → expand → search → score → safety → synthesise. Model fallback chain (Haiku → Sonnet) on 429/529 errors.
 - **Encounter Agent**: SOAP note, care plan (multi-language + print), discharge summary generation — all STG-grounded
-- **Clinical Assistant**: Multi-turn conversational agent with 9 tools (guidelines, drugs, safety, referrals, KB search)
+- **Clinical Assistant**: Multi-turn conversational agent with 9 tools (guidelines, drugs, safety, referrals, KB search). **Proactive context awareness** — automatically uses all patient context (pregnancy, allergies, vitals, current meds, age, sex, chronic conditions) without being asked. **Deterministic context injection** — tool handlers receive ground-truth patient data injected at dispatch time, never relying on LLM to relay patient facts correctly.
 - **Knowledge Base**: 98 markdown files across 7 sources in `.claude-plugin/knowledge-base/` — STG (22), Hospital EML (26), Paediatric EML (24), O&G (2), Maternal (20), SATS (3), Road to Health (1)
 - **Referral-Only Conditions**: 15 conditions (9 O&G + 6 Hospital EML critical) with `referral_required=TRUE` — triage FINDS them but says REFER, not TREAT
 - **Care Level Boundaries**: Primary STG (treat) → Hospital EML (referral context only) → Specialist (flag + refer). Enforced in Clinical Assistant system prompt and knowledge model.
-- **Clinical Opportunities Engine**: 25 deterministic rules — screening, dx-triggered workups, vitals nudges, SDOH, med safety
+- **Clinical Opportunities Engine**: 27 deterministic rules — screening, dx-triggered workups, vitals nudges, SDOH, med safety
+- **Proactive Prescription Safety**: Deterministic batch safety checker (`agents/prescription_safety.py`). No LLM. Checks: pregnancy (DB + 40+ in-memory drug classes), allergy cross-reactivity (8 drug classes + generic direct-name matching for ANY allergy), 17 drug-drug interaction rules, CNS stacking, paediatric dosing. Pre-screens formulary drugs with "Contraindicated" badges before nurse prescribes. Frontend: inline alerts on prescribed drugs, summary banner, "Ask CareMate for alternatives" link → auto-chat.
+- **Pregnancy Safety Data**: 281/337 medicines (83%) have `pregnancy_safe` + `pregnancy_notes` populated in DB. 215 safe, 66 unsafe. Remaining 56 are non-prescribable entries (breast milk, gauze, sugar water, etc.).
+- **Context Propagation**: Patient context (pregnancy, vitals, allergies, meds) flows from triage → encounter → Clinical Assistant automatically. **Deterministic injection** at tool dispatch — 6 tools get patient data injected directly, not via LLM params.
+- **Demo Presentation**: Interactive clinician demo at `presentation/demo.html` — 18 screenshots, Emma Thompson walkthrough (triage → proactive safety alerts → Ask CareMate → prescribing → care plan in isiXhosa), targeted at Unjani/SHAWCO CEOs
 - **Deep Test**: 92/92 conditions found (97.8% top-5, 92.4% Top-1), EXCELLENT grade
 - **Performance**: 9-10s production triage, 5-6s local; 2-3s per encounter generation; <1ms opportunities
 - **Deploy command**: `cd ~/Downloads/caremate-backend-v2 && railway up`
@@ -53,8 +57,10 @@ caremate-backend-v2/
       sats-triage/       ← 3 SATS manual files
       road-to-health/    ← 1 under-5 development file
     agents/            ← agent behaviour definitions (markdown)
-  presentation/    ← architecture deck + clinician overview (source copies)
-  docs/            ← TODO.md, EHR_PLAN.md, planning docs
+  presentation/    ← architecture deck + clinician overview + live demo walkthrough
+    demo.html          ← interactive clinician demo (Emma Thompson, 18 screenshots)
+    demo-images/       ← 18 screenshots for the demo walkthrough
+  docs/            ← TODO.md, EHR_PLAN.md, COMPETITIVE_LANDSCAPE.md, planning docs
   venv/            ← Python virtual environment
 ```
 
@@ -65,7 +71,8 @@ caremate-backend-v2/
 - `agents/encounter_agent.py` — Encounter documentation: `generate_soap_note()`, `generate_care_plan()`, `generate_discharge_summary()` — all STG-grounded
 - `agents/clinical_assistant.py` — ClinicalAssistant class, 9-tool agentic loop (guidelines, drugs, safety, referrals, KB search), multi-turn DB-persisted conversations
 - `agents/kb_search.py` — File-based markdown KB search engine for Clinical Assistant tool #9, searches 98 files across 7 knowledge sources
-- `agents/opportunities.py` — ClinicalOpportunitiesEngine: 25 deterministic rules across 5 categories (screening, dx-workups, vitals, SDOH, med safety)
+- `agents/opportunities.py` — ClinicalOpportunitiesEngine: 27 deterministic rules across 5 categories + drug interaction sets (CYP450_INDUCERS, ORAL_CONTRACEPTIVES, ACE_INHIBITORS, NSAIDS, CNS_DEPRESSANTS)
+- `agents/prescription_safety.py` — Proactive prescription safety checker: batch DB + in-memory rules, 8 allergy classes, 17 interaction pairs, 40+ pregnancy-unsafe drugs. Single source of truth for INTERACTION_RULES + PREGNANCY_UNSAFE_CLASSES (imported by clinical_assistant.py)
 - `agents/tools.py` — 6 triage tool handlers, batch DB queries, prevalence boost
 - `agents/sats.py` — SATS triage: `compute_sats_acuity()`, TEWS vital scoring (adult + child), clinical discriminators
 - `agents/scoring_config.py` — centralised scoring constants, feature weights, prevalence tiers, non-disease penalties
@@ -99,6 +106,9 @@ POST /api/guidelines/lookup            ← structured STG guideline sections
 POST /api/prescribing/suggest-dosing   ← medication dosing
 POST /api/prescribing/recommended-drugs ← drugs for condition by treatment line
 
+Prescription Safety:
+POST /api/prescriptions/safety-check   ← batch safety check (pregnancy, allergies, interactions, paediatric)
+
 Phase II Clinician Survey:
 GET  /api/vignettes                  ← list all vignettes
 POST /api/vignettes                  ← create a vignette (admin)
@@ -109,23 +119,25 @@ POST /api/vignettes/:id/run-caremate ← auto-run CareMate on a vignette
 ```
 - API Key header: `X-API-Key`
 
-### Clinical Assistant — 9 Tools
+### Clinical Assistant — 9 Tools + Deterministic Context Injection
 1. `search_guidelines` — search STG knowledge base with optional condition filter (DB)
-2. `lookup_condition` — full STG entry: description, danger signs, medicines, referral criteria (DB)
+2. `lookup_condition` — full STG entry: description, danger signs, medicines, referral criteria (DB). **Injects**: pregnancy flag, allergies → annotates medicines with warnings
 3. `check_red_flags` — match symptoms against danger signs (DB)
-4. `search_medications` — drug dosing, pregnancy safety, paediatric dosing, routes (DB)
-5. `find_conditions` — differential diagnosis from symptoms, age/sex filtered (DB)
-6. `check_drug_safety` — patient-specific safety: pregnancy, interactions, age concerns (in-memory)
-7. `suggest_alternative` — find alternative drugs when one is contraindicated (DB)
-8. `draft_referral_letter` — generate referral letter with encounter context (LLM)
+4. `search_medications` — drug dosing, pregnancy safety, paediatric dosing, routes (DB). **Injects**: pregnancy flag → annotates results with pregnancy warnings
+5. `find_conditions` — differential diagnosis from symptoms, age/sex filtered (DB). **Injects**: age, sex from encounter context
+6. `check_drug_safety` — patient-specific safety: pregnancy, interactions, age concerns (in-memory). **Injects**: pregnancy (overrides LLM), age, sex, current meds (all overridden)
+7. `suggest_alternative` — find alternative drugs when one is contraindicated (DB). **Injects**: pregnancy flag, allergies → filters unsafe drugs, sorts safe first
+8. `draft_referral_letter` — generate referral letter with encounter context (LLM). **Injects**: full patient demographics, vitals, diagnosis, allergies, meds
 9. `search_knowledge_base` — search extended markdown KB beyond STG: Hospital EML, Paediatric EML, O&G, Maternal, SATS (file-based)
 
-### Clinical Opportunities Engine — 25 Rules, 5 Categories
+**Deterministic Context Injection** (`_inject_patient_context()` in `clinical_assistant.py`): Patient context is extracted ONCE from the encounter and injected into tool parameters at dispatch time. This ensures tools get ground-truth patient data regardless of what the LLM decides to pass. Critical fix: LLMs often omit or misreport patient context (e.g., pregnancy status) when calling tools.
+
+### Clinical Opportunities Engine — 27 Rules, 5 Categories
 - **Screening** (7): cervical cancer, breast self-exam, BP, glucose, HIV, TB, antenatal panel
 - **Dx-Triggered Workups** (6): diabetes foot/eye/HbA1c, HTN target organ damage, HIV baseline, depression PHQ-9, STI partner notification
 - **Vitals Safety Nudges** (4): incidental elevated BP, unexplained tachycardia, low SpO2, hypothermia
 - **SDOH & Social Assistance** (4): SASSA disability grant, TB DOTS, free maternal care, SADAG helpline
-- **Medication Safety** (4): ACE in pregnancy, warfarin+NSAID, CNS stacking, ACE+NSAID
+- **Medication Safety** (6): ACE in pregnancy, warfarin+NSAID, CNS stacking, ACE+NSAID, **rifampicin+OCP** (CYP450 induction), **NSAID in pregnancy**
 
 ### Multi-Language Care Plans
 Supports all 11 SA official languages at Grade 8 literacy level (print-ready):
@@ -165,7 +177,9 @@ cd ~/Downloads/caremate-backend-v2 && source venv/bin/activate
 ```
 
 ## Open Priorities (see `docs/TODO.md` for full list)
-- **EVAH RFP**: Secure partners, finalize Pathway A proposal by Apr 1
+- **EVAH RFP**: Secure partners, finalize Pathway A proposal by Apr 1. Google/Heimerl team may also apply.
+- **Competitive**: 6-12 month window as only working SA-STG CDST. See `docs/COMPETITIVE_LANDSCAPE.md`
+- **Partnerships**: SHAWCO pilot first (March-April, EVAH data) → Unjani scale deployment (Q2, complement EMG)
 - **Knowledge Base**: COMPLETE — 98 files across 7 sources. 15 referral-only conditions added. Care level boundaries enforced.
 - **Validation**: Phase II survey frontend + Tasleem's vignettes, O&G re-test with Tasleem's sister
 - **Compliance**: AWS Cape Town migration, SAHPRA consultation, POPIA DPIA
@@ -193,7 +207,7 @@ cd ~/Downloads/caremate-backend-v2 && source venv/bin/activate
 
 ### Tier 3 — Strategic / Medium-Term
 7. **Longitudinal patient record (EHR layer)** — Patient history across encounters, continuity of care
-8. ~~**Drug interaction / prescription clash checking**~~ — DONE. `check_drug_safety` tool in Clinical Assistant + medication safety rules in Opportunities Engine (ACE+NSAID, warfarin+NSAID, CNS stacking, ACE in pregnancy)
+8. ~~**Drug interaction / prescription clash checking**~~ — DONE. Proactive prescription safety checker (`agents/prescription_safety.py`) with 17 interaction rules, 8 allergy cross-reactivity classes, 40+ pregnancy-unsafe drugs. Also: `check_drug_safety` tool in Clinical Assistant (imports same rules) + medication safety rules in Opportunities Engine.
 9. **API-first / embeddable mode** — CareMate as embeddable API inside other EHRs
 
 ### Tier 4 — Vision / Long-Term
@@ -262,9 +276,8 @@ cd ~/Downloads/caremate-backend-v2 && source venv/bin/activate
 
 ### Action Items
 - [x] RFP analysed (2026-03-02)
-- [x] 5 clarifying questions drafted for evah@povertyactionlab.org (due March 6)
-- [ ] Submit questions by March 6
-- [ ] Secure SA-based lead applicant entity (Dr Tasleem's institution or SA university)
+- [x] 5 clarifying questions drafted and submitted (2026-03-06)
+- [x] Proposal draft ~50% complete
 - [ ] Identify evaluation/research partner (UCT, Stellenbosch, Wits — health sciences)
 - [ ] Formalize clinical implementation partner (letter of support from clinic/district)
 - [ ] Build landing page at caremate.co.za

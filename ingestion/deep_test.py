@@ -833,6 +833,26 @@ TEST_CASES = [
         "alt_codes": ["17.1.5"],
         "symptoms": ["losing weight", "poor appetite", "morning cough getting worse", "long smoking history"],
     },
+
+    # ==========================================================================
+    # Duration-Aware Scoring (onset modifies ranking)
+    # ==========================================================================
+    {
+        "id": "DUR-01",
+        "chapter_name": "Duration-Aware",
+        "condition_name": "Common Cold (Viral Rhinitis)",
+        "stg_code": "19.2",
+        "symptoms": ["cough", "sore throat", "runny nose"],
+        "onset": "1-3 days",
+    },
+    {
+        "id": "DUR-02",
+        "chapter_name": "Duration-Aware",
+        "condition_name": "Pulmonary Tuberculosis (TB)",
+        "stg_code": "17.4",
+        "symptoms": ["cough", "weight loss", "night sweats"],
+        "onset": "> 2 weeks",
+    },
 ]
 
 
@@ -1144,13 +1164,15 @@ async def synonym_search(conn: asyncpg.Connection, symptoms: list[str]) -> list[
     return ranked
 
 
-async def agent_search(pool: asyncpg.Pool, symptoms: list[str]) -> dict:
+async def agent_search(pool: asyncpg.Pool, symptoms: list[str],
+                       onset: str = None) -> dict:
     """
-    Enhanced search: multi-method + group counting + prevalence boost.
+    Enhanced search: multi-method + group counting + prevalence boost + duration modifiers.
     Steps:
       1. Run graph + text + vector + synonym search
       2. Merge with cross-method symptom group tracking
       3. Apply SA prevalence boost
+      4. Apply duration modifiers (if onset provided)
     Returns {"merged": [...]} in the same format as combined_search().
     """
     from agents.scoring_config import SA_PREVALENCE_BOOST, PREVALENCE_TIER
@@ -1221,6 +1243,28 @@ async def agent_search(pool: asyncpg.Pool, symptoms: list[str]) -> dict:
             entry["score"] = entry["score"] * SA_PREVALENCE_BOOST[tier]
 
     ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
+
+    # Step 4: Apply duration modifiers (if onset provided)
+    if onset:
+        from agents.scoring_config import DURATION_CATEGORIES, DURATION_PROFILE_MULTIPLIERS
+        category = DURATION_CATEGORIES.get(onset)
+        if category:
+            # Look up duration_profile for all conditions in results
+            cids = [entry["id"] for entry in ranked]
+            if cids:
+                async with pool.acquire() as conn:
+                    profile_rows = await conn.fetch(
+                        "SELECT id, duration_profile FROM conditions WHERE id = ANY($1::int[])",
+                        cids,
+                    )
+                profile_map = {r["id"]: r["duration_profile"] for r in profile_rows}
+                for entry in ranked:
+                    profile = profile_map.get(entry["id"])
+                    if profile and profile in DURATION_PROFILE_MULTIPLIERS:
+                        multiplier = DURATION_PROFILE_MULTIPLIERS[profile].get(category, 1.0)
+                        if multiplier != 1.0:
+                            entry["score"] *= multiplier
+                ranked.sort(key=lambda x: x["score"], reverse=True)
 
     return {
         "merged": ranked,
@@ -1359,10 +1403,11 @@ async def run_single_test(pool_or_conn, test_case: dict, verbose: bool = False,
     actual_name = condition["name"] if condition else test_case["condition_name"]
 
     # Run search — agent pipeline (default) or legacy combined_search
+    onset = test_case.get("onset")
     if legacy:
         search = await combined_search(pool_or_conn, symptoms)
     else:
-        search = await agent_search(pool_or_conn, symptoms)
+        search = await agent_search(pool_or_conn, symptoms, onset=onset)
     top5 = search["merged"][:5]
 
     # Build list of acceptable codes (primary + alternates)

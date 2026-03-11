@@ -170,3 +170,194 @@ VECTOR_SIMILARITY_THRESHOLD = 0.65
 VECTOR_SCORE_RANGE = 0.35        # (1.0 - threshold)
 VECTOR_MAX_CONTRIBUTION = 0.70   # Max normalised vector score
 VECTOR_MIN_CONTRIBUTION = 0.15   # Min normalised vector score
+
+# ───────────────────────────────────────────────────────────────
+# Pregnancy-Required Conditions
+# ───────────────────────────────────────────────────────────────
+# Conditions that can ONLY be diagnosed if the patient is currently
+# pregnant (or recently postpartum). When the patient explicitly
+# reports "not pregnant", these conditions receive a near-zero
+# penalty (0.05x) to effectively exclude them from the differential.
+#
+# This is a deterministic clinical logic filter — not relying on the
+# LLM to figure out that "Threatened Miscarriage" doesn't apply to
+# a non-pregnant 53-year-old.
+PREGNANCY_REQUIRED_CODES = {
+    # Chapter 6 — Obstetrics (STG Primary)
+    "6.1.1",     # Miscarriage
+    "6.2.1",     # Threatened Miscarriage
+    "6.2.2",     # Miscarriage - Medical Management
+    "6.3",       # Termination of Pregnancy
+    "6.3.1",     # Termination of Pregnancy (specific)
+    "6.4",       # Antenatal Supplements
+    "6.4.2",     # Hypertensive Disorders in Pregnancy
+    "6.4.2.1",   # Chronic HTN in Pregnancy
+    "6.4.2.4",   # Pre-eclampsia
+    "6.4.2.5",   # Eclampsia
+    "6.4.3",     # Anaemia in Pregnancy
+    "6.4.4",     # Syphilis in Pregnancy
+    "6.4.5.2",   # Cystitis in Pregnancy
+    "6.4.7",     # Preterm Labour
+    "6.4.7.2",   # PPROM
+    "6.4.7.3",   # PPROM (variant)
+    "6.5",       # Intrapartum Care / Labour Management
+    "6.6.4",     # Perinatal Hep B Transmission
+    "6.7.1",     # Postpartum Haemorrhage (PPH)
+    "6.7.2",     # Puerperal Sepsis
+    "6.8",       # HIV in Pregnancy
+    "6.9",       # Perinatal Depression/Anxiety
+    "6.9.2",     # Bipolar Disorder Perinatal
+    "6.11",      # Ectopic Pregnancy
+    # Referral-only O&G
+    "REF.OG.1",  # Foetal Distress
+    "REF.OG.2",  # Placental Abruption
+    "REF.OG.3",  # Placenta Praevia
+    "REF.OG.5",  # Molar Pregnancy
+    "REF.OG.8",  # Hyperemesis Gravidarum
+    "REF.OG.9",  # Chorioamnionitis
+}
+PREGNANCY_REQUIRED_PENALTY = 0.05  # Near-zero: effectively removes from differential
+
+# ───────────────────────────────────────────────────────────────
+# Gynaecological Complaint Keywords
+# ───────────────────────────────────────────────────────────────
+# Used to trigger deterministic menopausal status questions for
+# women 40+ presenting with gynaecological symptoms.
+GYNAE_COMPLAINT_KEYWORDS = {
+    "vaginal bleeding", "vaginal discharge", "bleeding",
+    "menstrual", "period", "menopause", "spotting",
+    "pelvic pain", "lower abdominal pain", "dysmenorrhoea",
+    "amenorrhoea", "irregular periods",
+}
+
+# ───────────────────────────────────────────────────────────────
+# Lab Result → Condition Mapping
+# ───────────────────────────────────────────────────────────────
+# Deterministic mapping of confirmed lab results to STG conditions.
+# Follows the same injection pattern as vitals → conditions.
+#
+# Two input paths feed into the same injection function:
+#   1. Text parsing: regex scan on complaint text (nurses typing "HIV reactive")
+#   2. Structured input: lab_results API parameter (EMR integration)
+#
+# Adding a new lab result = adding one dict entry. No code changes needed.
+# ───────────────────────────────────────────────────────────────
+# Duration-Aware Scoring
+# ───────────────────────────────────────────────────────────────
+# Maps UI onset strings → duration category, then applies per-condition
+# multipliers to adjusted_score. Two mechanisms:
+#   1. Penalty (mult < 1.0) for self-limiting conditions when duration
+#      exceeds their natural course (e.g. common cold lasting > 1 week)
+#   2. Boost (mult > 1.0) for chronic/infectious conditions when duration
+#      matches their clinical profile (e.g. TB with > 2 weeks cough)
+
+DURATION_CATEGORIES = {
+    "sudden onset": "acute",
+    "< 24 hours": "acute",
+    "1-3 days": "acute",
+    "1–3 days": "acute",       # em dash variant (frontend)
+    "4-7 days": "acute",
+    "4–7 days": "acute",       # em dash variant (frontend)
+    "> 1 week": "subacute",
+    "> 2 weeks": "subacute",
+    "> 1 month": "chronic",
+}
+
+# {duration_profile: {duration_category: multiplier}}
+# Profiles are stored in conditions.duration_profile column (DB-driven).
+# NULL profile = no modifier applied.
+DURATION_PROFILE_MULTIPLIERS = {
+    "acute_self_limiting": {"acute": 1.0, "subacute": 0.5, "chronic": 0.3},
+    "acute_severe":        {"acute": 1.0, "subacute": 1.0, "chronic": 1.0},
+    "subacute_infectious": {"acute": 0.8, "subacute": 1.5, "chronic": 1.8},
+    "chronic":             {"acute": 0.8, "subacute": 1.1, "chronic": 1.3},
+    "variable":            {"acute": 1.0, "subacute": 1.0, "chronic": 1.0},
+}
+
+# ───────────────────────────────────────────────────────────────
+# Lab Result → Condition Mapping
+# ───────────────────────────────────────────────────────────────
+LAB_RESULT_PATTERNS = [
+    {
+        "id": "hiv_positive",
+        "patterns": [
+            r"hiv\s+(screening\s+)?reactive",
+            r"hiv\s+(test\s+)?positive",
+            r"hiv\s+confirmed",
+            r"hiv\+",
+            r"hiv\s+rapid\s+test\s+positive",
+            r"hiv\s+elisa\s+positive",
+        ],
+        "structured_names": ["hiv", "hiv antibody", "hiv elisa", "hiv rapid test"],
+        "positive_keywords": ["positive", "reactive", "confirmed", "detected"],
+        "condition_codes": {"pregnant": "6.8", "default": "11.1"},
+        "force_rank_one": True,
+        "score_boost": 2.0,
+        "add_symptoms": ["hiv positive"],
+        "marker_label": "HIV screening reactive",
+    },
+    {
+        "id": "syphilis_positive",
+        "patterns": [
+            r"rpr\s+(test\s+)?positive",
+            r"rpr\s+reactive",
+            r"vdrl\s+(test\s+)?positive",
+            r"vdrl\s+reactive",
+            r"syphilis\s+(test\s+)?positive",
+            r"syphilis\s+confirmed",
+        ],
+        "structured_names": ["rpr", "vdrl", "syphilis", "syphilis serology"],
+        "positive_keywords": ["positive", "reactive", "detected"],
+        "condition_codes": {"pregnant": "6.4.4", "default": "12.5"},
+        "force_rank_one": True,
+        "score_boost": 2.0,
+        "add_symptoms": ["syphilis positive"],
+        "marker_label": "Syphilis screening positive",
+    },
+    {
+        "id": "tb_positive",
+        "patterns": [
+            r"genexpert\s+positive",
+            r"xpert\s+positive",
+            r"sputum\s+(smear\s+)?positive",
+            r"tb\s+(test\s+)?positive",
+            r"afb\s+(smear\s+)?positive",
+        ],
+        "structured_names": ["genexpert", "xpert", "sputum", "afb", "tb test"],
+        "positive_keywords": ["positive", "detected", "confirmed"],
+        "condition_codes": {"default": "17.4.1"},
+        "force_rank_one": True,
+        "score_boost": 2.0,
+        "add_symptoms": ["tuberculosis confirmed", "sputum positive"],
+        "marker_label": "TB test positive",
+    },
+    {
+        "id": "malaria_positive",
+        "patterns": [
+            r"malaria\s+(rdt|rapid\s+test|smear)\s+positive",
+            r"malaria\s+(test\s+)?positive",
+        ],
+        "structured_names": ["malaria rdt", "malaria smear", "malaria rapid test"],
+        "positive_keywords": ["positive", "detected"],
+        "condition_codes": {"default": "10.7"},
+        "force_rank_one": True,
+        "score_boost": 2.0,
+        "add_symptoms": ["malaria positive"],
+        "marker_label": "Malaria test positive",
+    },
+    {
+        "id": "diabetes_confirmed",
+        "patterns": [
+            r"hba1c\s+(elevated|raised|high|abnormal)",
+            r"diabetes\s+confirmed",
+            r"diabetic",
+        ],
+        "structured_names": ["hba1c", "fasting glucose", "random glucose", "ogtt"],
+        "positive_keywords": ["elevated", "raised", "high", "abnormal", "confirmed"],
+        "condition_codes": {"default": "9.2"},
+        "force_rank_one": True,
+        "score_boost": 2.0,
+        "add_symptoms": ["diabetes confirmed", "hyperglycaemia"],
+        "marker_label": "Diabetes confirmed",
+    },
+]

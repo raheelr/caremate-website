@@ -31,6 +31,8 @@ from agents.scoring_config import (
     NON_DISEASE_CHAPTERS,
     NON_DISEASE_PENALTY,
     NON_DISEASE_KEYWORDS,
+    PREGNANCY_REQUIRED_CODES,
+    PREGNANCY_REQUIRED_PENALTY,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,40 @@ def _apply_prevalence_boost(conditions: list[dict]) -> list[dict]:
 # Aliases for backward compatibility
 _NON_DISEASE_CHAPTERS = NON_DISEASE_CHAPTERS
 _NON_DISEASE_KEYWORDS = NON_DISEASE_KEYWORDS
+
+
+def _penalize_pregnancy_conditions(conditions: list[dict], pregnancy_status: str) -> list[dict]:
+    """Apply near-zero penalty to pregnancy-required conditions when patient
+    is explicitly not pregnant.
+
+    Only fires when pregnancy_status is explicitly negative ("not pregnant",
+    "no", "none"). Unknown/missing status does NOT trigger the penalty —
+    we err on the side of caution and keep pregnancy conditions visible.
+    """
+    explicitly_not_pregnant = pregnancy_status.lower().strip() in (
+        "not pregnant", "no", "none", "negative", "n/a",
+    )
+    if not explicitly_not_pregnant:
+        return conditions
+
+    penalized = 0
+    for c in conditions:
+        code = c.get("stg_code", "")
+        if code in PREGNANCY_REQUIRED_CODES:
+            c["adjusted_score"] = round(
+                c.get("adjusted_score", 0) * PREGNANCY_REQUIRED_PENALTY, 3
+            )
+            c["raw_score"] = round(
+                c.get("raw_score", 0) * PREGNANCY_REQUIRED_PENALTY, 3
+            )
+            c.setdefault("matched_features", []).append(
+                "pregnancy-required condition (patient not pregnant)"
+            )
+            penalized += 1
+
+    if penalized:
+        logger.info(f"Pregnancy filter: penalized {penalized} conditions (patient not pregnant)")
+    return conditions
 
 
 def _penalize_non_disease(conditions: list[dict], complaint: str) -> list[dict]:
@@ -408,6 +444,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
     is_pregnant = tool_input.get("patient_is_pregnant", False)
     patient_sex = tool_input.get("patient_sex")
     patient_age = tool_input.get("patient_age")
+    pregnancy_status = tool_input.get("pregnancy_status", "unknown")
     medications = tool_input.get("medications", [])
     limit = tool_input.get("limit", 10)
 
@@ -494,6 +531,10 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
         complaint_text = " ".join(original_symptoms) if original_symptoms else " ".join(symptoms)
         conditions = _penalize_non_disease(conditions, complaint_text)
 
+        # Pregnancy-required penalty: zero out obstetric conditions for non-pregnant patients
+        if pregnancy_status and pregnancy_status != "unknown":
+            conditions = _penalize_pregnancy_conditions(conditions, pregnancy_status)
+
         # Sort by adjusted_score, then raw_score as tiebreak
         conditions.sort(key=lambda c: (c["adjusted_score"], c["raw_score"]), reverse=True)
         conditions = conditions[:limit]
@@ -532,6 +573,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                             "name": vr["name"],
                             "chapter_name": vr["chapter_name"],
                             "extraction_confidence": vr["extraction_confidence"],
+                            "duration_profile": vr.get("duration_profile"),
                             "match_count": 1,
                             "raw_score": vec_score,
                             "matched_features": [feat],
@@ -595,7 +637,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                         SELECT unnest($1::text[]) AS canonical
                     )
                     SELECT DISTINCT ct.canonical, c.id, c.stg_code, c.name,
-                           c.chapter_name, c.extraction_confidence
+                           c.chapter_name, c.extraction_confidence, c.duration_profile
                     FROM cterms ct
                     JOIN conditions c ON c.name ILIKE '%' || ct.canonical || '%'
                     WHERE ($2::text IS NULL
@@ -618,7 +660,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                             SELECT unnest($1::text[]) AS canonical
                         )
                         SELECT DISTINCT ct.canonical, c.id, c.stg_code, c.name,
-                               c.chapter_name, c.extraction_confidence
+                               c.chapter_name, c.extraction_confidence, c.duration_profile
                         FROM cterms ct
                         JOIN clinical_entities ce
                             ON ce.canonical_name ILIKE '%' || ct.canonical || '%'
@@ -678,6 +720,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                     "name": row["name"],
                     "chapter_name": row["chapter_name"],
                     "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                    "duration_profile": row.get("duration_profile"),
                     "match_count": n_terms,
                     "raw_score": syn_score,
                     "matched_features": [
@@ -700,7 +743,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                     SELECT unnest($1::text[]) AS term
                 )
                 SELECT DISTINCT it.term, c.id, c.stg_code, c.name,
-                       c.chapter_name, c.extraction_confidence
+                       c.chapter_name, c.extraction_confidence, c.duration_profile
                 FROM input_terms it
                 JOIN conditions c ON c.name ILIKE '%' || it.term || '%'
                 WHERE ($2::text IS NULL
@@ -742,6 +785,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                     "name": row["name"],
                     "chapter_name": row["chapter_name"],
                     "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                    "duration_profile": row.get("duration_profile"),
                     "match_count": num_terms,
                     "raw_score": name_score,
                     "matched_features": [f"{t} (condition name match)" for t in matched_terms],
@@ -760,7 +804,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                     SELECT unnest($1::text[]) AS term
                 )
                 SELECT it.term, c.id, c.stg_code, c.name, c.chapter_name,
-                       c.extraction_confidence, kc.section_role
+                       c.extraction_confidence, c.duration_profile, kc.section_role
                 FROM input_terms it
                 JOIN knowledge_chunks kc ON kc.chunk_text ILIKE '%' || it.term || '%'
                 JOIN conditions c ON c.id = kc.condition_id
@@ -826,6 +870,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                     "name": row["name"],
                     "chapter_name": row["chapter_name"],
                     "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                    "duration_profile": row.get("duration_profile"),
                     "match_count": num_terms,
                     "raw_score": chunk_score,
                     "matched_features": [
@@ -845,7 +890,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                     SELECT unnest($1::text[]) AS term
                 )
                 SELECT it.term, c.id, c.stg_code, c.name, c.chapter_name,
-                       c.extraction_confidence
+                       c.extraction_confidence, c.duration_profile
                 FROM input_terms it
                 JOIN conditions c ON c.description_text ILIKE '%' || it.term || '%'
                 WHERE ($2::text IS NULL
@@ -893,6 +938,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                     "name": row["name"],
                     "chapter_name": row["chapter_name"],
                     "extraction_confidence": float(row["extraction_confidence"] or 1.0),
+                    "duration_profile": row.get("duration_profile"),
                     "match_count": len(data["terms"]),
                     "raw_score": desc_score,
                     "matched_features": [
