@@ -1,9 +1,5 @@
-[phases.setup]
-# Force clean build — bust Docker layer cache
-cmds = ["echo 'build-v2-2026-03-12'"]
-
 [phases.install]
-cmds = ["pip install -r requirements-deploy.txt"]
+cmds = ["pip install --no-cache-dir -r requirements-deploy.txt"]
 
 [start]
-cmd = "ls db/*.py && python3 -c 'import sys; print(sys.path)' && uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+cmd = "ls -la /app/db/ && uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"
