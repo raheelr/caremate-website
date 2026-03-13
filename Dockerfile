@@ -6,12 +6,12 @@ WORKDIR /app
 COPY requirements-deploy.txt .
 RUN pip install --no-cache-dir -r requirements-deploy.txt
 
-# Copy application code (only what the API needs)
+# Copy application code
 COPY agents/ agents/
 COPY api/ api/
 COPY safety/ safety/
-COPY db/__init__.py db/__init__.py
-COPY db/database.py db/database.py
+COPY db/ db/
+COPY .claude-plugin/ .claude-plugin/
 
 # Railway injects PORT
 ENV PORT=8000
