@@ -6,4 +6,4 @@ cmds = ["echo 'build-v2-2026-03-12'"]
 cmds = ["pip install -r requirements-deploy.txt"]
 
 [start]
-cmd = "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+cmd = "ls db/*.py && python3 -c 'import sys; print(sys.path)' && uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"
