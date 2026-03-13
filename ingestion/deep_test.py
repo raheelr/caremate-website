@@ -55,7 +55,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-from agents.scoring_config import SA_PREVALENCE_BOOST, PREVALENCE_TIER
+from agents.scoring_config import SA_PREVALENCE_BOOST
+
+# Prevalence tier loaded from DB cache at runtime (see _load_prevalence_tier())
+_PREVALENCE_TIER: dict[str, str] = {}
 
 
 # == Test Case Definitions =====================================================
@@ -869,11 +872,18 @@ async def graph_search(conn: asyncpg.Connection, symptoms: list[str]) -> dict:
     """
     results = {}
 
+    # Stop words for word-level matching
+    _stop = {"a", "an", "the", "in", "on", "at", "to", "of", "is", "am",
+             "my", "me", "i", "it", "no", "or", "and", "but", "for", "not",
+             "has", "had", "have", "was", "been", "can", "do", "does", "lot",
+             "very", "much", "when", "with", "from", "this", "that"}
+
     for symptom in symptoms:
         term = symptom.lower().strip()
         if not term:
             continue
 
+        # Primary search: full substring match
         rows = await conn.fetch("""
             SELECT cr.condition_id, c.name, c.stg_code,
                    cr.relationship_type, cr.feature_type,
@@ -884,6 +894,29 @@ async def graph_search(conn: asyncpg.Connection, symptoms: list[str]) -> dict:
             WHERE (ce.canonical_name ILIKE $1 OR ce.aliases::text ILIKE $1)
               AND cr.relationship_type IN ('INDICATES', 'RED_FLAG', 'ASSOCIATED_WITH', 'RISK_FACTOR')
         """, f"%{term}%")
+
+        # Word-level fallback: when substring search finds nothing for a
+        # multi-word symptom, try matching where ALL significant words appear.
+        # Handles word-order differences like "heart racing" → "racing heart".
+        # Only activates as fallback to avoid diluting good substring matches.
+        if not rows:
+            words = [w for w in term.split() if len(w) >= 3 and w not in _stop]
+            if len(words) >= 2:
+                word_conditions = " AND ".join(
+                    f"(ce.canonical_name ILIKE ${i+1} OR ce.aliases::text ILIKE ${i+1})"
+                    for i in range(len(words))
+                )
+                word_query = f"""
+                    SELECT cr.condition_id, c.name, c.stg_code,
+                           cr.relationship_type, cr.feature_type,
+                           ce.canonical_name
+                    FROM clinical_relationships cr
+                    JOIN conditions c ON c.id = cr.condition_id
+                    JOIN clinical_entities ce ON ce.id = cr.source_entity_id
+                    WHERE ({word_conditions})
+                      AND cr.relationship_type IN ('INDICATES', 'RED_FLAG', 'ASSOCIATED_WITH', 'RISK_FACTOR')
+                """
+                rows = await conn.fetch(word_query, *[f"%{w}%" for w in words])
 
         # IDF-like penalty: if a symptom matches too many conditions,
         # each match is worth less (prevents "fever" from swamping results)
@@ -1175,8 +1208,6 @@ async def agent_search(pool: asyncpg.Pool, symptoms: list[str],
       4. Apply duration modifiers (if onset provided)
     Returns {"merged": [...]} in the same format as combined_search().
     """
-    from agents.scoring_config import SA_PREVALENCE_BOOST, PREVALENCE_TIER
-
     # Step 1: Run all search methods
     async with pool.acquire() as conn:
         graph_results = await graph_search(conn, symptoms)
@@ -1235,10 +1266,10 @@ async def agent_search(pool: asyncpg.Pool, symptoms: list[str],
     for cid in merged:
         entry = merged[cid]
         code = entry.get("stg_code", "")
-        tier = PREVALENCE_TIER.get(code)
+        tier = _PREVALENCE_TIER.get(code)
         if not tier and "." in code:
             parent = code.rsplit(".", 1)[0]
-            tier = PREVALENCE_TIER.get(parent)
+            tier = _PREVALENCE_TIER.get(parent)
         if tier:
             entry["score"] = entry["score"] * SA_PREVALENCE_BOOST[tier]
 
@@ -1712,6 +1743,25 @@ async def main():
     except Exception as e:
         print(f"  ERROR: Cannot connect to database: {e}")
         sys.exit(1)
+
+    # Load prevalence tier from DB cache
+    global _PREVALENCE_TIER
+    async with pool.acquire() as conn:
+        from db.clinical_data_cache import load_clinical_cache
+        _cache = await load_clinical_cache(conn)
+        _PREVALENCE_TIER = _cache.prevalence_tier
+
+        # Inject cache into agent modules (needed for agent pipeline mode)
+        import agents.tools as _tools_mod
+        import agents.prescription_safety as _ps_mod
+        import agents.opportunities as _opp_mod
+        import agents.sats as _sats_mod
+        import agents.triage_agent as _ta_mod
+        _tools_mod._cache = _cache
+        _ps_mod._cache = _cache
+        _opp_mod._cache = _cache
+        _sats_mod._cache = _cache
+        _ta_mod._cache = _cache
 
     # Quick DB summary
     async with pool.acquire() as conn:

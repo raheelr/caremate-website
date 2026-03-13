@@ -27,38 +27,34 @@ from db.database import (
 )
 from agents.scoring_config import (
     SA_PREVALENCE_BOOST,
-    PREVALENCE_TIER,
-    NON_DISEASE_CHAPTERS,
     NON_DISEASE_PENALTY,
-    NON_DISEASE_KEYWORDS,
-    PREGNANCY_REQUIRED_CODES,
     PREGNANCY_REQUIRED_PENALTY,
+    PREGNANCY_CONTEXT_BOOST,
+    PAEDIATRIC_CONTEXT_BOOST,
+    PAEDIATRIC_AGE_THRESHOLD,
+    USE_DISCRIMINATING_POWER,
 )
 
 logger = logging.getLogger(__name__)
 
-# Alias for backward compatibility with internal references
-_PREVALENCE_TIER = PREVALENCE_TIER
+# Cache injected by api/main.py at startup
+_cache = None  # type: ignore  # ClinicalDataCache
 
 
 def _apply_prevalence_boost(conditions: list[dict]) -> list[dict]:
     """Apply SA prevalence boost to conditions with matching STG codes."""
+    prevalence_tier = _cache.prevalence_tier if _cache else {}
     for c in conditions:
         code = c.get("stg_code", "")
         # Check exact code and parent codes (e.g., 4.7.1 → check 4.7.1 then 4.7)
-        tier = _PREVALENCE_TIER.get(code)
+        tier = prevalence_tier.get(code)
         if not tier and "." in code:
             parent = code.rsplit(".", 1)[0]
-            tier = _PREVALENCE_TIER.get(parent)
+            tier = prevalence_tier.get(parent)
         if tier:
             boost = SA_PREVALENCE_BOOST[tier]
             c["adjusted_score"] = round(c.get("adjusted_score", 0) * boost, 3)
     return conditions
-
-
-# Aliases for backward compatibility
-_NON_DISEASE_CHAPTERS = NON_DISEASE_CHAPTERS
-_NON_DISEASE_KEYWORDS = NON_DISEASE_KEYWORDS
 
 
 def _penalize_pregnancy_conditions(conditions: list[dict], pregnancy_status: str) -> list[dict]:
@@ -75,10 +71,11 @@ def _penalize_pregnancy_conditions(conditions: list[dict], pregnancy_status: str
     if not explicitly_not_pregnant:
         return conditions
 
+    pregnancy_required_codes = _cache.pregnancy_required_codes if _cache else set()
     penalized = 0
     for c in conditions:
         code = c.get("stg_code", "")
-        if code in PREGNANCY_REQUIRED_CODES:
+        if code in pregnancy_required_codes:
             c["adjusted_score"] = round(
                 c.get("adjusted_score", 0) * PREGNANCY_REQUIRED_PENALTY, 3
             )
@@ -95,6 +92,146 @@ def _penalize_pregnancy_conditions(conditions: list[dict], pregnancy_status: str
     return conditions
 
 
+def _apply_discriminating_power(conditions: list[dict]) -> list[dict]:
+    """Apply discriminating power weights from reasoning rules to feature scores.
+
+    When USE_DISCRIMINATING_POWER is True, features with high discriminating
+    power (e.g., "neck stiffness" for meningitis = 0.92) get weighted more
+    than generic features (e.g., "fever" = 0.4).
+
+    This modifies adjusted_score by multiplying each matched feature's
+    weight by its discriminating power from the reasoning rules.
+
+    Gated by USE_DISCRIMINATING_POWER flag in scoring_config.py.
+    Default OFF — must run deep test before enabling.
+    """
+    if not USE_DISCRIMINATING_POWER:
+        return conditions
+    if not _cache or not _cache.reasoning_rules:
+        return conditions
+
+    for c in conditions:
+        code = c.get("stg_code", "")
+        rules = _cache.reasoning_rules.get(code, [])
+        if not rules:
+            continue
+
+        # Build feature → discriminating_power map
+        feature_power: dict[str, float] = {}
+        for rule in rules:
+            rt = rule.get("rule_type", "")
+            rd = rule.get("rule_data", {})
+            dp = rule.get("discriminating_power", 0.5)
+
+            # Extract the feature name from different rule types
+            feature_name = None
+            if rt == "examination_finding":
+                feature_name = rd.get("finding", "")
+            elif rt == "clinical_sign":
+                feature_name = rd.get("sign_name", "")
+            elif rt == "history_discriminator":
+                feature_name = rd.get("discriminator", "")
+
+            if feature_name:
+                key = feature_name.lower().strip()
+                # Keep highest discriminating power if multiple rules match
+                if key not in feature_power or dp > feature_power[key]:
+                    feature_power[key] = dp
+
+        if not feature_power:
+            continue
+
+        # Apply discriminating power to matched features
+        matched = c.get("matched_features", [])
+        power_sum = 0.0
+        power_count = 0
+        for feat in matched:
+            feat_lower = feat.lower().split(" (")[0].strip()
+            dp = feature_power.get(feat_lower, 0.5)  # default 0.5
+            power_sum += dp
+            power_count += 1
+
+        if power_count > 0:
+            avg_power = power_sum / power_count
+            # Scale score: avg_power of 0.5 = no change, >0.5 = boost, <0.5 = reduce
+            # Factor range: 0.6 (low power) to 1.4 (high power)
+            factor = 0.6 + (avg_power * 0.8)
+            c["adjusted_score"] = round(c.get("adjusted_score", 0) * factor, 3)
+            c["discriminating_power_factor"] = round(factor, 3)
+
+    return conditions
+
+
+def _boost_pregnancy_conditions(conditions: list[dict], pregnancy_status: str) -> list[dict]:
+    """Boost O&G conditions (chapter 6) when patient is confirmed pregnant.
+
+    Pregnancy-specific conditions like pre-eclampsia should rank above
+    generic conditions (e.g. hypertension) when the patient is pregnant,
+    since the differential diagnosis changes fundamentally.
+    """
+    explicitly_pregnant = pregnancy_status.lower().strip() in (
+        "pregnant", "yes", "confirmed", "positive",
+    )
+    if not explicitly_pregnant:
+        return conditions
+
+    boosted = 0
+    for c in conditions:
+        code = c.get("stg_code", "")
+        # Chapter 6 = Obstetrics & Gynaecology
+        if code.startswith("6."):
+            c["adjusted_score"] = round(
+                c.get("adjusted_score", 0) * PREGNANCY_CONTEXT_BOOST, 3
+            )
+            c.setdefault("matched_features", []).append(
+                "pregnancy-context boost (patient is pregnant)"
+            )
+            boosted += 1
+
+    if boosted:
+        logger.info(f"Pregnancy boost: boosted {boosted} O&G conditions (patient is pregnant)")
+    return conditions
+
+
+# Name substrings that identify paediatric-specific condition variants.
+# Matched case-insensitively against condition name.
+_PAEDIATRIC_NAME_MARKERS = (
+    "paediatric", "pediatric", "children", "childhood",
+    "infant", "neonatal", "neonate", "newborn",
+)
+
+
+def _boost_paediatric_conditions(conditions: list[dict], patient_age: int | None) -> list[dict]:
+    """Boost paediatric-specific conditions when patient is a child.
+
+    When both a generic version (e.g. "Diarrhea, Acute") and a paediatric
+    version (e.g. "Diarrhea, Acute (Paediatric)") are in the results,
+    the paediatric version should rank higher for child patients.
+    Idempotent: skips conditions already boosted.
+    """
+    if patient_age is None or patient_age >= PAEDIATRIC_AGE_THRESHOLD:
+        return conditions
+
+    boosted = 0
+    for c in conditions:
+        # Skip if already boosted (idempotent guard)
+        if "paediatric-context boost (patient is a child)" in c.get("matched_features", []):
+            continue
+        name_lower = c.get("name", "").lower()
+        if any(marker in name_lower for marker in _PAEDIATRIC_NAME_MARKERS):
+            c["adjusted_score"] = round(
+                c.get("adjusted_score", 0) * PAEDIATRIC_CONTEXT_BOOST, 3
+            )
+            c.setdefault("matched_features", []).append(
+                "paediatric-context boost (patient is a child)"
+            )
+            boosted += 1
+
+    if boosted:
+        logger.info(f"Paediatric boost: boosted {boosted} conditions (patient age {patient_age})")
+    return conditions
+
+
 def _penalize_non_disease(conditions: list[dict], complaint: str) -> list[dict]:
     """Remove non-disease conditions (immunisation, counseling) that matched
     on side effects rather than patient intent.
@@ -104,9 +241,11 @@ def _penalize_non_disease(conditions: list[dict], complaint: str) -> list[dict]:
     immunisation conditions have many side-effect edges that generate high
     raw scores for common symptoms like headache, dizziness, body aches.
     """
+    non_disease_keywords = _cache.keyword_sets.get("non_disease_keywords", set()) if _cache else set()
+    non_disease_chapters = _cache.non_disease_chapters if _cache else set()
     complaint_lower = complaint.lower()
     # If the complaint mentions vaccines/immunisation, keep all conditions
-    if any(kw in complaint_lower for kw in _NON_DISEASE_KEYWORDS):
+    if any(kw in complaint_lower for kw in non_disease_keywords):
         return conditions
     filtered = []
     for c in conditions:
@@ -125,18 +264,48 @@ def _penalize_non_disease(conditions: list[dict], complaint: str) -> list[dict]:
             m = re.match(r"(\d+)\.", stg_code)
             if m:
                 chapter_num = int(m.group(1))
-        if chapter_num not in _NON_DISEASE_CHAPTERS:
+        if chapter_num not in non_disease_chapters:
             filtered.append(c)
     return filtered
 
 
-async def _filter_parent_headings(conn, conditions: list[dict]) -> list[dict]:
+def _names_related(parent_name: str, child_name: str) -> bool:
+    """Check if parent and child condition names are clinically related.
+
+    Uses word overlap after stripping stop words.  Prevents mis-linked
+    children (e.g. "Nappy Dermatitis" → "Angioedema") from being
+    substituted for their parent heading.
+    """
+    stop = {
+        "in", "of", "the", "and", "or", "with", "for", "a", "an", "to",
+        "on", "by", "at", "is", "-", "–", "(", ")", ",",
+    }
+    parent_words = {
+        w.lower().strip("(),–-")
+        for w in parent_name.replace(",", " ").split()
+    } - stop
+    child_words = {
+        w.lower().strip("(),–-")
+        for w in child_name.replace(",", " ").split()
+    } - stop
+    # At least one meaningful word in common
+    return bool(parent_words & child_words)
+
+
+async def _filter_parent_headings(
+    conn, conditions: list[dict], patient_age: int | None = None,
+) -> list[dict]:
     """
     Replace parent heading conditions with their best populated child.
     E.g., "4.7 Hypertension" → replaced with "4.7.1 Hypertension In Adults"
     which has actual description_text and clinical content.
 
-    If the child already exists in results, the parent is simply removed.
+    Guards:
+    - Only replaces if child name is related to parent (word overlap).
+      Prevents STG ingestion mis-links like "Obesity in Diabetes" →
+      "Hypothyroidism in Neonates" (sequential sections, not true hierarchy).
+    - Respects patient_age so a neonatal child isn't selected for an adult.
+    - If no suitable child exists, the empty parent is dropped from results.
     """
     codes = [c.get("stg_code", "") for c in conditions if c.get("stg_code")]
     if not codes:
@@ -159,31 +328,39 @@ async def _filter_parent_headings(conn, conditions: list[dict]) -> list[dict]:
     if not parent_codes:
         return conditions
 
-    # For each parent, find the best child to replace it with
-    child_map = {}  # parent_code → child condition row
+    # For each parent, find candidate children (age-filtered, ordered by
+    # description length).  We fetch up to 5 so we can check name-relatedness.
+    child_map = {}  # parent_code → best related child row
+    parent_name_map = {c.get("stg_code", ""): c.get("name", "") for c in conditions}
     for pc in parent_codes:
-        child = await conn.fetchrow("""
+        candidates = await conn.fetch("""
             SELECT id, stg_code, name, chapter_name, extraction_confidence
             FROM conditions
             WHERE stg_code LIKE $1 || '.%'
               AND stg_code != $1
               AND description_text IS NOT NULL
               AND TRIM(description_text) != ''
+              AND ($2::int IS NULL OR (min_age_years <= $2 AND max_age_years >= $2))
             ORDER BY length(description_text) DESC
-            LIMIT 1
-        """, pc)
-        if child:
-            child_map[pc] = dict(child)
+            LIMIT 5
+        """, pc, patient_age)
+        parent_name = parent_name_map.get(pc, "")
+        for candidate in candidates:
+            if _names_related(parent_name, candidate["name"]):
+                child_map[pc] = dict(candidate)
+                break
+        # No related child found → parent will be dropped (not replaced)
 
     existing_codes = {c.get("stg_code", "") for c in conditions}
     result = []
     replaced = 0
+    dropped = 0
     for c in conditions:
         code = c.get("stg_code", "")
         if code in parent_codes:
             child = child_map.get(code)
             if child and child["stg_code"] not in existing_codes:
-                # Replace parent with child, keeping the parent's score
+                # Replace parent with related child, keeping the parent's score
                 replacement = dict(c)
                 replacement["id"] = child["id"]
                 replacement["stg_code"] = child["stg_code"]
@@ -193,13 +370,19 @@ async def _filter_parent_headings(conn, conditions: list[dict]) -> list[dict]:
                 result.append(replacement)
                 existing_codes.add(child["stg_code"])
                 replaced += 1
-            # else: child already in results, just drop the parent
+            elif child:
+                # Related child already in results → drop parent (deduplicate)
+                dropped += 1
+            else:
+                # No related child found (ingestion mis-link) → keep parent
+                # The parent was found through legitimate symptom matching;
+                # dropping it would lose a valid search result.
+                result.append(c)
         else:
             result.append(c)
 
-    if replaced or len(result) < len(conditions):
-        logger.info(f"Parent headings: {replaced} replaced, "
-                     f"{len(conditions) - len(result)} removed")
+    if replaced or dropped:
+        logger.info(f"Parent headings: {replaced} replaced, {dropped} dropped")
     return result
 
 
@@ -527,13 +710,22 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
         # SA prevalence boost: common PHC conditions get slight score boost
         conditions = _apply_prevalence_boost(conditions)
 
+        # Discriminating power: weight features by STG-extracted discriminating power
+        # Gated by USE_DISCRIMINATING_POWER flag (default OFF)
+        conditions = _apply_discriminating_power(conditions)
+
         # Non-disease penalty: immunisation chapter conditions matched on side effects
         complaint_text = " ".join(original_symptoms) if original_symptoms else " ".join(symptoms)
         conditions = _penalize_non_disease(conditions, complaint_text)
 
         # Pregnancy-required penalty: zero out obstetric conditions for non-pregnant patients
+        # Pregnancy context boost: upweight O&G conditions when patient is pregnant
         if pregnancy_status and pregnancy_status != "unknown":
             conditions = _penalize_pregnancy_conditions(conditions, pregnancy_status)
+            conditions = _boost_pregnancy_conditions(conditions, pregnancy_status)
+
+        # Paediatric context boost: upweight paediatric-specific variants for child patients
+        conditions = _boost_paediatric_conditions(conditions, patient_age)
 
         # Sort by adjusted_score, then raw_score as tiebreak
         conditions.sort(key=lambda c: (c["adjusted_score"], c["raw_score"]), reverse=True)
@@ -643,7 +835,8 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                     WHERE ($2::text IS NULL
                            OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
                            OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-                """, canonical_list, patient_sex)
+                    AND ($3::int IS NULL OR (c.min_age_years <= $3 AND c.max_age_years >= $3))
+                """, canonical_list, patient_sex, patient_age)
 
                 canonical_to_conds = {}
                 resolved_canonicals = set()
@@ -674,7 +867,8 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                         AND ($2::text IS NULL
                              OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
                              OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-                    """, unresolved, patient_sex)
+                        AND ($3::int IS NULL OR (c.min_age_years <= $3 AND c.max_age_years >= $3))
+                    """, unresolved, patient_sex, patient_age)
 
                     for row in twohop_rows:
                         c = row["canonical"]
@@ -749,7 +943,8 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                 WHERE ($2::text IS NULL
                      OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
                      OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-            """, terms_for_name, patient_sex)
+                AND ($3::int IS NULL OR (c.min_age_years <= $3 AND c.max_age_years >= $3))
+            """, terms_for_name, patient_sex, patient_age)
             for row in all_name_rows:
                 cid = row["id"]
                 if cid not in name_matches:
@@ -811,7 +1006,8 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                 WHERE ($2::text IS NULL
                      OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
                      OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-            """, terms_for_chunk, patient_sex)
+                AND ($3::int IS NULL OR (c.min_age_years <= $3 AND c.max_age_years >= $3))
+            """, terms_for_chunk, patient_sex, patient_age)
             section_priority = {
                 "CLINICAL_PRESENTATION": 1, "DANGER_SIGNS": 2,
                 "MANAGEMENT": 3, "DOSING_TABLE": 4,
@@ -896,7 +1092,8 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                 WHERE ($2::text IS NULL
                      OR ($2 = 'male' AND c.applies_to_male IS NOT FALSE)
                      OR ($2 = 'female' AND c.applies_to_female IS NOT FALSE))
-            """, terms_for_desc, patient_sex)
+                AND ($3::int IS NULL OR (c.min_age_years <= $3 AND c.max_age_years >= $3))
+            """, terms_for_desc, patient_sex, patient_age)
             for row in all_desc_rows:
                 cid = row["id"]
                 if cid not in desc_matches:
@@ -951,7 +1148,7 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
 
         # Medication boost: if patient is on medications, boost conditions those meds treat
         if medications:
-            med_conditions = await get_conditions_for_medications(conn, medications)
+            med_conditions = await get_conditions_for_medications(conn, medications, patient_age=patient_age)
             existing_by_id = {c["id"]: c for c in conditions}
             for mc in med_conditions:
                 cid = mc["id"]
@@ -986,8 +1183,15 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
         # can re-introduce immunisation/counselling conditions.
         conditions = _penalize_non_disease(conditions, complaint_text)
 
+        # Re-apply paediatric boost for conditions added by later stages.
+        # Idempotent: already-boosted conditions are skipped.
+        conditions = _boost_paediatric_conditions(conditions, patient_age)
+
+        # Final re-sort after post-processing adjustments
+        conditions.sort(key=lambda c: (c.get("adjusted_score", 0), c.get("raw_score", 0)), reverse=True)
+
         # Filter out parent headings (e.g., 4.7) when populated children exist (4.7.1)
-        conditions = await _filter_parent_headings(conn, conditions)
+        conditions = await _filter_parent_headings(conn, conditions, patient_age=patient_age)
 
         # Deduplicate by condition name — keep only highest-scoring entry
         # (e.g., collapses 7 "Candidiasis, Oral (Thrush), Recurrent" into 1)
@@ -999,6 +1203,33 @@ async def handle_search_conditions(tool_input: dict, pool: asyncpg.Pool) -> dict
                 seen_names[name] = True
                 deduped.append(c)
         conditions = deduped
+
+        # ── Systemic age safety net ─────────────────────────────────────
+        # Final guard: batch-verify every condition's age range against the
+        # patient.  Catches anything that slipped through ANY upstream path
+        # (graph, synonym, chunk, name, description, medication, parent
+        # heading replacement, or future new paths).
+        if patient_age is not None and conditions:
+            cond_ids = [c["id"] for c in conditions if c.get("id")]
+            if cond_ids:
+                valid_ids = {
+                    r["id"]
+                    for r in await conn.fetch(
+                        "SELECT id FROM conditions "
+                        "WHERE id = ANY($1::int[]) "
+                        "AND min_age_years <= $2 AND max_age_years >= $2",
+                        cond_ids,
+                        patient_age,
+                    )
+                }
+                before = len(conditions)
+                conditions = [c for c in conditions if c.get("id") in valid_ids]
+                dropped = before - len(conditions)
+                if dropped:
+                    logger.info(
+                        f"Age safety net: removed {dropped} age-inappropriate "
+                        f"condition(s) for patient age {patient_age}"
+                    )
 
         red_flags = await get_red_flag_matches(conn, all_search_terms)
 

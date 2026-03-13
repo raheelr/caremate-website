@@ -71,6 +71,7 @@ from db.database import (
     get_vignette_responses, get_vignette_comparison,
     create_assistant_conversation, get_assistant_messages, save_assistant_message,
 )
+from db.clinical_data_cache import load_clinical_cache
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger("caremate.api")
@@ -92,10 +93,31 @@ async def lifespan(app: FastAPI):
     app.state.assistant = ClinicalAssistant(pool)
     app.state.safety = SafetyChecker()
 
-    # Verify DB connection
+    # Load clinical data cache from DB (drug classes, interactions, discriminators, etc.)
     async with pool.acquire() as conn:
         count = await conn.fetchval("SELECT COUNT(*) FROM conditions")
-    logger.info(f"Database ready — {count} conditions loaded")
+        clinical_cache = await load_clinical_cache(conn)
+    app.state.clinical_cache = clinical_cache
+
+    # Inject cache into agent modules (replaces hardcoded Python data)
+    import agents.tools as _tools_mod
+    import agents.prescription_safety as _ps_mod
+    import agents.opportunities as _opp_mod
+    import agents.sats as _sats_mod
+    import agents.triage_agent as _ta_mod
+    import agents.clinical_assistant as _ca_mod
+
+    import agents.question_engine as _qe_mod
+
+    _tools_mod._cache = clinical_cache
+    _ps_mod._cache = clinical_cache
+    _opp_mod._cache = clinical_cache
+    _sats_mod._cache = clinical_cache
+    _ta_mod._cache = clinical_cache
+    _ca_mod._cache = clinical_cache
+    _qe_mod._cache = clinical_cache
+
+    logger.info(f"Database ready — {count} conditions loaded, clinical cache injected")
 
     yield
 
@@ -1210,6 +1232,7 @@ async def check_prescription_safety(request: PrescriptionSafetyRequest):
                 prescriptions=request.prescriptions,
                 patient_context=patient_context,
                 recommended_drugs=request.recommended_drugs or None,
+                condition_codes=request.condition_codes or None,
             )
 
         return result

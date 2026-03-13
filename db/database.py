@@ -520,11 +520,13 @@ async def get_conditions_for_symptoms(
 async def get_conditions_for_medications(
     conn: asyncpg.Connection,
     medication_names: list[str],
+    patient_age: Optional[int] = None,
 ) -> list[dict]:
     """
     Find conditions treated by the patient's current medications.
     Uses the condition_medicines + medicines tables.
     Returns conditions with the matched medication info.
+    Respects age filters to avoid e.g. neonatal conditions for adults.
     """
     if not medication_names:
         return []
@@ -536,8 +538,10 @@ async def get_conditions_for_medications(
         JOIN conditions c ON c.id = cm.condition_id
         JOIN medicines m ON m.id = cm.medicine_id
         WHERE m.name ILIKE ANY($1::text[])
+        AND ($2::int IS NULL OR (c.min_age_years <= $2 AND c.max_age_years >= $2))
         ORDER BY c.name
-    """, [f"%{med.lower().strip()}%" for med in medication_names if med.strip()])
+    """, [f"%{med.lower().strip()}%" for med in medication_names if med.strip()],
+         patient_age)
 
     return [dict(r) for r in rows]
 
@@ -865,11 +869,13 @@ async def get_condition_by_stg_code(
 async def get_vitals_mappings(
     conn: asyncpg.Connection,
     vitals: dict,
+    patient_age: int | None = None,
 ) -> list[dict]:
     """
     Query vitals_condition_mapping for all thresholds matching the given vitals.
     Returns matched mappings sorted by score_boost descending.
     For each vital, picks the HIGHEST matching threshold (most specific).
+    Filters by patient age when provided.
     """
     if not vitals:
         return []
@@ -878,21 +884,38 @@ async def get_vitals_mappings(
     for vital_name, value in vitals.items():
         if value is None:
             continue
-        # Query all matching thresholds for this vital
-        rows = await conn.fetch("""
-            SELECT vm.*, c.stg_code, c.name as condition_name,
-                   c.chapter_name, c.extraction_confidence, c.duration_profile
-            FROM vitals_condition_mapping vm
-            JOIN conditions c ON c.id = vm.condition_id
-            WHERE vm.vital_name = $1
-            AND (
-                (vm.operator = 'gte' AND $2::float >= vm.threshold)
-                OR (vm.operator = 'gt' AND $2::float > vm.threshold)
-                OR (vm.operator = 'lte' AND $2::float <= vm.threshold)
-                OR (vm.operator = 'lt' AND $2::float < vm.threshold)
-            )
-            ORDER BY vm.score_boost DESC
-        """, vital_name, float(value))
+        # Query all matching thresholds for this vital, with age filtering
+        if patient_age is not None:
+            rows = await conn.fetch("""
+                SELECT vm.*, c.stg_code, c.name as condition_name,
+                       c.chapter_name, c.extraction_confidence, c.duration_profile
+                FROM vitals_condition_mapping vm
+                JOIN conditions c ON c.id = vm.condition_id
+                WHERE vm.vital_name = $1
+                AND (
+                    (vm.operator = 'gte' AND $2::float >= vm.threshold)
+                    OR (vm.operator = 'gt' AND $2::float > vm.threshold)
+                    OR (vm.operator = 'lte' AND $2::float <= vm.threshold)
+                    OR (vm.operator = 'lt' AND $2::float < vm.threshold)
+                )
+                AND c.min_age_years <= $3 AND c.max_age_years >= $3
+                ORDER BY vm.score_boost DESC
+            """, vital_name, float(value), patient_age)
+        else:
+            rows = await conn.fetch("""
+                SELECT vm.*, c.stg_code, c.name as condition_name,
+                       c.chapter_name, c.extraction_confidence, c.duration_profile
+                FROM vitals_condition_mapping vm
+                JOIN conditions c ON c.id = vm.condition_id
+                WHERE vm.vital_name = $1
+                AND (
+                    (vm.operator = 'gte' AND $2::float >= vm.threshold)
+                    OR (vm.operator = 'gt' AND $2::float > vm.threshold)
+                    OR (vm.operator = 'lte' AND $2::float <= vm.threshold)
+                    OR (vm.operator = 'lt' AND $2::float < vm.threshold)
+                )
+                ORDER BY vm.score_boost DESC
+            """, vital_name, float(value))
 
         # Group by condition_id, keep highest score_boost per condition
         seen = {}

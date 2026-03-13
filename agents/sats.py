@@ -22,6 +22,9 @@ Discriminators override TEWS (e.g., active seizure → RED regardless of vitals)
 
 from typing import Optional
 
+# Cache injected by api/main.py at startup
+_cache = None  # type: ignore  # ClinicalDataCache
+
 # ── TEWS Score → Colour Mapping ──────────────────────────────────────────────
 
 TEWS_COLOUR_MAP = [
@@ -295,92 +298,18 @@ def _score_hr_child(hr: float, age: int) -> int:
 
 # ── Clinical Discriminators ──────────────────────────────────────────────────
 # These override TEWS — if any discriminator matches, the colour is set directly.
+# Loaded from DB via ClinicalDataCache (see db/clinical_data_cache.py).
 
-ADULT_EMERGENCY_SIGNS = [
-    "obstructed airway",
-    "not breathing",
-    "seizure - current",
-    "seizures - current",
-    "active seizure",
-    "burn - facial",
-    "inhalation burn",
-    "hypoglycaemia",
-    "glucose less than 3",
-    "glucose < 3",
-    "cardiac arrest",
-]
-
-ADULT_VERY_URGENT_SIGNS = [
-    "shortness of breath - acute",
-    "acute shortness of breath",
-    "reduced consciousness",
-    "haemoptysis",
-    "coughing blood",
-    "chest pain",
-    "stabbed neck",
-    "uncontrolled haemorrhage",
-    "arterial bleed",
-    "post ictal",
-    "focal neurology",
-    "acute stroke",
-    "aggression",
-    "threatened limb",
-    "compound fracture",
-    "open fracture",
-    "burn over 20%",
-    "electrical burn",
-    "circumferential burn",
-    "chemical burn",
-    "poisoning",
-    "overdose",
-    "vomiting fresh blood",
-    "haematemesis",
-    "severe pain",
-    "pregnancy and abdominal trauma",
-    "pregnancy and abdominal pain",
-]
-
-ADULT_URGENT_SIGNS = [
-    "high energy transfer",
-    "motor vehicle accident",
-    "pedestrian vehicle accident",
-    "fall from height",
-    "high velocity gunshot",
-    "eye injury",
-    "dislocation of larger joint",
-    "diabetic - glucose over 11",
-    "ketonuria",
-    "vomiting persistently",
-    "moderate pain",
-    "controlled haemorrhage",
-    "closed fracture",
-    "burn - other",
-    "abdominal pain",
-]
-
-PAEDIATRIC_EMERGENCY_SIGNS = [
-    "not breathing",
-    "apnoea",
-    "obstructed breathing",
-    "central cyanosis",
-    "spo2 < 92",
-    "severe respiratory distress",
-    "cold hands with weak pulse",
-    "capillary refill >= 3",
-    "uncontrolled bleeding",
-    "responds only to pain",
-    "unresponsive",
-    "confusion",
-    "convulsing",
-    "immediately post-ictal",
-    "severe dehydration",
-    "facial burn",
-    "inhalation burn",
-    "hypoglycaemia",
-    "glucose < 3",
-    "purpuric rash",
-    "non-blanching rash",
-]
+def _get_discriminators():
+    """Get discriminator lists from cache."""
+    if _cache:
+        return (
+            _cache.adult_emergency_signs,
+            _cache.adult_very_urgent_signs,
+            _cache.adult_urgent_signs,
+            _cache.paediatric_emergency_signs,
+        )
+    return ([], [], [], [])
 
 
 def check_discriminators(
@@ -418,8 +347,11 @@ def check_discriminators(
             matched.append(f"SpO2 {spo2}% < 92%")
             colour = "red"
 
+    # Get discriminators from cache
+    adult_emergency, adult_very_urgent, adult_urgent, paed_emergency = _get_discriminators()
+
     # Check emergency signs
-    emergency_signs = PAEDIATRIC_EMERGENCY_SIGNS if is_child else ADULT_EMERGENCY_SIGNS
+    emergency_signs = paed_emergency if is_child else adult_emergency
     for sign in emergency_signs:
         if sign in search_text:
             matched.append(f"Emergency: {sign}")
@@ -433,7 +365,7 @@ def check_discriminators(
         }
 
     # Check very urgent signs
-    very_urgent_signs = ADULT_VERY_URGENT_SIGNS
+    very_urgent_signs = adult_very_urgent
     for sign in very_urgent_signs:
         if sign in search_text:
             matched.append(f"Very urgent: {sign}")
@@ -448,7 +380,7 @@ def check_discriminators(
         }
 
     # Check urgent signs
-    urgent_signs = ADULT_URGENT_SIGNS
+    urgent_signs = adult_urgent
     for sign in urgent_signs:
         if sign in search_text:
             matched.append(f"Urgent: {sign}")

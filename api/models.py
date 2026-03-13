@@ -84,6 +84,9 @@ class AnalyzeResponse(BaseModel):
     sats_priority: Optional[str] = None          # "Routine" | "Urgent" | "Very Urgent" | "Emergency"
     tews_score: Optional[int] = None             # 0-7+
     sats_target_minutes: Optional[int] = None    # 0, 10, 60, 240
+    # Match quality (confidence floor) — "Does the STG cover this presentation?"
+    match_quality: Optional[str] = None          # "strong_match" | "partial_match" | "no_clear_match"
+    low_confidence_warning: Optional[str] = None # Warning banner text (None = no warning)
 
 
 # ── POST /api/triage/refine ──────────────────────────────────────────────────
@@ -107,6 +110,9 @@ class RefineResponse(BaseModel):
     conditions: Optional[list[ConditionResult]] = None
     next_round_questions: Optional[list[AssessmentQuestion]] = None
     red_flag_alert: Optional[str] = None
+    # Match quality carried forward from analyze
+    match_quality: Optional[str] = None          # "strong_match" | "partial_match" | "no_clear_match"
+    low_confidence_warning: Optional[str] = None
 
 
 # ── POST /api/triage/enrich ──────────────────────────────────────────────────
@@ -315,4 +321,5 @@ class PrescriptionSafetyRequest(BaseModel):
     allergies: Optional[str] = None            # comma-separated or single allergy
     current_medications: list[str] = []        # existing meds (not in prescriptions list)
     confirmed_diagnosis: Optional[str] = None  # for recommended drug lookup
+    condition_codes: list[str] = []            # STG codes for condition-drug mod checks
     recommended_drugs: list[dict] = []         # [{name, treatment_line}] STG formulary drugs

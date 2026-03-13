@@ -23,9 +23,19 @@ from typing import Optional
 
 from agents.tools import TOOL_HANDLERS
 from agents.sats import compute_sats_acuity
+from agents.question_engine import (
+    select_assessment_questions as _select_rule_questions,
+    get_referral_triggers,
+    classify_severity,
+    match_lab_rules,
+    check_vital_rules,
+)
 from db.database import get_condition_rich_content, get_condition_features_batch, get_condition_details_batch
 
 logger = logging.getLogger(__name__)
+
+# Cache injected by api/main.py at startup
+_cache = None  # type: ignore  # ClinicalDataCache
 
 
 # ── STG text cleaning ────────────────────────────────────────────────────────
@@ -458,7 +468,8 @@ class TriageAgent:
                 {"test_name": getattr(lr, "test_name", ""), "result": getattr(lr, "result", "")}
                 for lr in lab_results
             ]
-        lab_matches = self._extract_lab_results(complaint, pregnancy_status, structured_labs)
+        patient_age_for_lab = patient.get("age") if patient else None
+        lab_matches = self._extract_lab_results(complaint, pregnancy_status, structured_labs, patient_age=patient_age_for_lab)
         if lab_matches:
             logger.info(f"Lab results detected: {[lr['id'] for lr in lab_matches]}")
 
@@ -553,11 +564,11 @@ class TriageAgent:
         # STG defines Hypertension as systolic >= 140 mmHg or diastolic >= 90 mmHg.
         # If vitals show elevated BP, inject/boost Hypertension — the graph has no
         # symptom edges for headache/dizziness → hypertension.
-        conditions = await self._inject_vitals_conditions(conditions, vitals or {})
+        conditions = await self._inject_vitals_conditions(conditions, vitals or {}, patient_age=patient_age)
 
         # 2b-extra-2. Lab-confirmed condition injection (100% deterministic)
         if lab_matches:
-            conditions = await self._inject_lab_conditions(conditions, lab_matches)
+            conditions = await self._inject_lab_conditions(conditions, lab_matches, patient_age=patient_age)
 
         # 2b-extra-3. Duration-aware scoring (100% deterministic)
         # Penalise self-limiting conditions for long durations (cold > 1 week),
@@ -567,13 +578,13 @@ class TriageAgent:
         # Filter out pregnancy-required conditions from search results when
         # patient is explicitly not pregnant. Applied early so downstream
         # stages (details, features, LLM) never see them.
-        from agents.scoring_config import PREGNANCY_REQUIRED_CODES as _PRC
+        pregnancy_required_codes = _cache.pregnancy_required_codes if _cache else set()
         if pregnancy_status.lower().strip() in (
             "not pregnant", "no", "none", "negative", "n/a",
         ):
             conditions = [
                 c for c in conditions
-                if c.get("stg_code", "") not in _PRC
+                if c.get("stg_code", "") not in pregnancy_required_codes
             ]
 
         # Update tool_results so _extract_verified_conditions sees the filtered conditions
@@ -676,14 +687,14 @@ class TriageAgent:
         # not pregnant. This must happen BEFORE the LLM re-ranking call,
         # otherwise the LLM promotes them back and position-based confidence
         # assignment (0.90, 0.78, ...) erases the deterministic penalty.
-        from agents.scoring_config import PREGNANCY_REQUIRED_CODES
+        preg_codes = _cache.pregnancy_required_codes if _cache else set()
         if pregnancy_status.lower().strip() in (
             "not pregnant", "no", "none", "negative", "n/a",
         ):
             before = len(verified_sorted)
             verified_sorted = [
                 v for v in verified_sorted
-                if v["stg_code"] not in PREGNANCY_REQUIRED_CODES
+                if v["stg_code"] not in preg_codes
             ]
             filtered = before - len(verified_sorted)
             if filtered:
@@ -751,13 +762,47 @@ class TriageAgent:
         deterministic_questions = self._build_deterministic_questions(
             patient, complaint, symptoms
         )
-        if deterministic_questions:
-            # Prepend deterministic questions so they appear first
-            assessment_questions = deterministic_questions + assessment_questions
+
+        # Inject STG-grounded rule-based questions (zero LLM, from reasoning rules)
+        rule_questions = _select_rule_questions(
+            differential=verified_sorted[:5],
+            known_symptoms=set(symptoms),
+            known_vitals=vitals or {},
+            known_labs={lab.get("test_name", ""): lab.get("value") for lab in (lab_results or [])},
+            patient_age=patient.get("age") if patient else None,
+            patient_sex=patient_sex,
+            current_round=1,
+            max_questions=5,
+        )
+
+        # Assemble: deterministic first, rule-based second, LLM last
+        # Deduplicate by normalised question text
+        seen_q = set()
+        final_questions = []
+        for q in deterministic_questions + rule_questions + assessment_questions:
+            q_text = (q.get("question") or "").lower().strip()
+            if q_text and q_text not in seen_q:
+                seen_q.add(q_text)
+                final_questions.append(q)
+        assessment_questions = final_questions[:8]  # Cap at 8 (5 + some overflow)
 
         # Build full response deterministically
+        # Build structured labs dict for rule matching
+        labs_dict = {}
+        if lab_results:
+            for lr in lab_results:
+                if isinstance(lr, dict):
+                    tn = lr.get("test_name", "")
+                    rv = lr.get("result", "")
+                else:
+                    tn = getattr(lr, "test_name", "")
+                    rv = getattr(lr, "result", "")
+                if tn:
+                    labs_dict[tn] = rv
+
         result = self._build_full_response(
-            tool_results, condition_symptoms, assessment_questions
+            tool_results, condition_symptoms, assessment_questions,
+            vitals=vitals, symptoms=symptoms, labs=labs_dict or None,
         )
 
         # Apply LLM re-ranking if available
@@ -1073,12 +1118,46 @@ class TriageAgent:
         if red_flag_alert:
             result["red_flag_alert"] = red_flag_alert
 
+        # Augment next-round questions with rule-based questions
+        if request_next_round and current_round < 5:
+            # Build known symptoms from confirmed answers
+            all_known = set(confirmed)
+            rule_next = _select_rule_questions(
+                differential=[
+                    {"stg_code": c.get("condition_code", ""), "name": c.get("condition_name", "")}
+                    for c in conditions[:5]
+                ],
+                known_symptoms=all_known,
+                known_vitals={},
+                known_labs={},
+                patient_age=patient.get("age") if patient else None,
+                patient_sex=(patient.get("sex") or "").lower() if patient else None,
+                current_round=current_round + 1,
+                max_questions=3,
+            )
+            if rule_next:
+                llm_next = result.get("next_round_questions") or []
+                # Deduplicate
+                seen_q = {(q.get("question") or "").lower().strip() for q in llm_next}
+                for rq in rule_next:
+                    q_text = (rq.get("question") or "").lower().strip()
+                    if q_text not in seen_q:
+                        seen_q.add(q_text)
+                        llm_next.append(rq)
+                result["next_round_questions"] = llm_next[:5]
+
         # Don't generate more questions past round 5
         if current_round >= 5:
             result["next_round_questions"] = None
 
         if not request_next_round:
             result["next_round_questions"] = None
+
+        # Propagate match quality from original analyze if available
+        if stg_feature_data and "match_quality" in stg_feature_data:
+            result["match_quality"] = stg_feature_data["match_quality"]
+            if "low_confidence_warning" in stg_feature_data:
+                result["low_confidence_warning"] = stg_feature_data["low_confidence_warning"]
 
         return result
 
@@ -1151,7 +1230,7 @@ class TriageAgent:
             patient_age=patient_age,
         )
 
-    async def _inject_vitals_conditions(self, conditions: list, vitals: dict) -> list:
+    async def _inject_vitals_conditions(self, conditions: list, vitals: dict, patient_age: int | None = None) -> list:
         """
         Inject/boost conditions based on vital signs using the vitals_condition_mapping table.
         Fully data-driven — no hardcoded condition logic.
@@ -1166,7 +1245,7 @@ class TriageAgent:
         from db.database import get_vitals_mappings
 
         async with self.pool.acquire() as conn:
-            mappings = await get_vitals_mappings(conn, vitals)
+            mappings = await get_vitals_mappings(conn, vitals, patient_age=patient_age)
 
         if not mappings:
             return conditions
@@ -1231,6 +1310,7 @@ class TriageAgent:
         complaint: str,
         pregnancy_status: str = "unknown",
         structured_labs: list[dict] | None = None,
+        patient_age: int | None = None,
     ) -> list[dict]:
         """
         Deterministic lab result extraction from complaint text and/or structured input.
@@ -1242,10 +1322,11 @@ class TriageAgent:
         - id, marker_label, target_code, force_rank_one, score_boost, add_symptoms
         """
         import re
-        from agents.scoring_config import LAB_RESULT_PATTERNS
 
+        lab_result_patterns = _cache.lab_result_patterns if _cache else []
         complaint_lower = complaint.lower()
         is_pregnant = pregnancy_status.lower().strip() in ("pregnant", "yes")
+        is_child = patient_age is not None and patient_age < 18
         matched_ids: set[str] = set()
         matches: list[dict] = []
 
@@ -1253,6 +1334,8 @@ class TriageAgent:
             codes = lab["condition_codes"]
             if is_pregnant and "pregnant" in codes:
                 return codes["pregnant"]
+            if is_child and "child" in codes:
+                return codes["child"]
             return codes.get("default")
 
         def _build_match(lab: dict) -> dict:
@@ -1266,12 +1349,32 @@ class TriageAgent:
             }
 
         # Path 1: Regex scan on complaint text
-        for lab in LAB_RESULT_PATTERNS:
+        for lab in lab_result_patterns:
             if lab["id"] in matched_ids:
                 continue
+            threshold = lab.get("numeric_threshold")
+            direction = lab.get("threshold_direction", "below")
             for pattern in lab["patterns"]:
-                if re.search(pattern, complaint_lower):
-                    matches.append(_build_match(lab))
+                m = re.search(pattern, complaint_lower)
+                if m:
+                    # Numeric threshold: extract captured value and compare
+                    if threshold is not None:
+                        try:
+                            value = float(m.group(1))
+                            triggered = (
+                                value < threshold if direction == "below"
+                                else value > threshold
+                            )
+                            if not triggered:
+                                continue
+                            # Annotate marker with actual value
+                            match = _build_match(lab)
+                            match["marker_label"] = f"{lab['marker_label']}: {value:.0f}"
+                            matches.append(match)
+                        except (IndexError, ValueError):
+                            continue
+                    else:
+                        matches.append(_build_match(lab))
                     matched_ids.add(lab["id"])
                     break
 
@@ -1280,26 +1383,48 @@ class TriageAgent:
             for sl in structured_labs:
                 test_name = sl.get("test_name", "").lower().strip()
                 result_val = sl.get("result", "").lower().strip()
-                for lab in LAB_RESULT_PATTERNS:
+                for lab in lab_result_patterns:
                     if lab["id"] in matched_ids:
                         continue
                     name_match = any(
                         sn in test_name or test_name in sn
                         for sn in lab.get("structured_names", [])
                     )
-                    result_match = any(
-                        kw in result_val
-                        for kw in lab.get("positive_keywords", [])
-                    )
-                    if name_match and result_match:
-                        matches.append(_build_match(lab))
-                        matched_ids.add(lab["id"])
-                        break
+                    if not name_match:
+                        continue
+                    threshold = lab.get("numeric_threshold")
+                    direction = lab.get("threshold_direction", "below")
+                    if threshold is not None:
+                        # Numeric lab: parse value and compare
+                        try:
+                            value = float(result_val)
+                            triggered = (
+                                value < threshold if direction == "below"
+                                else value > threshold
+                            )
+                            if triggered:
+                                match = _build_match(lab)
+                                match["marker_label"] = f"{lab['marker_label']}: {value:.0f}"
+                                matches.append(match)
+                                matched_ids.add(lab["id"])
+                        except ValueError:
+                            pass
+                    else:
+                        # Binary lab: check positive keywords
+                        result_match = any(
+                            kw in result_val
+                            for kw in lab.get("positive_keywords", [])
+                        )
+                        if result_match:
+                            matches.append(_build_match(lab))
+                            matched_ids.add(lab["id"])
+                    break
 
         return matches
 
     async def _inject_lab_conditions(
-        self, conditions: list, lab_results: list[dict]
+        self, conditions: list, lab_results: list[dict],
+        patient_age: int | None = None,
     ) -> list:
         """
         Inject/boost conditions based on confirmed lab results.
@@ -1320,12 +1445,21 @@ class TriageAgent:
                 continue
 
             async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT id, stg_code, name, chapter_name, extraction_confidence, "
-                    "referral_required, care_setting, source_tag, duration_profile "
-                    "FROM conditions WHERE stg_code = $1",
-                    target_code,
-                )
+                if patient_age is not None:
+                    row = await conn.fetchrow(
+                        "SELECT id, stg_code, name, chapter_name, extraction_confidence, "
+                        "referral_required, care_setting, source_tag, duration_profile "
+                        "FROM conditions WHERE stg_code = $1 "
+                        "AND min_age_years <= $2 AND max_age_years >= $2",
+                        target_code, patient_age,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        "SELECT id, stg_code, name, chapter_name, extraction_confidence, "
+                        "referral_required, care_setting, source_tag, duration_profile "
+                        "FROM conditions WHERE stg_code = $1",
+                        target_code,
+                    )
 
             if not row:
                 logger.warning(f"Lab injection: condition {target_code} not found in DB")
@@ -1892,14 +2026,20 @@ class TriageAgent:
         tool_results: dict,
         condition_symptoms: dict,
         assessment_questions: list[dict],
+        vitals: dict | None = None,
+        symptoms: list[str] | None = None,
+        labs: dict | None = None,
     ) -> dict:
         """Build the complete response deterministically from pre-computed data.
 
         All condition data comes from DB-sourced search results.
         condition_symptoms come from DB clinical_entities.
         assessment_questions come from the slim LLM call.
+        vitals/symptoms/labs are passed through for reasoning rule matching.
         """
-        symptoms = tool_results.get("extract_symptoms", {}).get("symptoms", [])
+        extracted_symptoms_raw = tool_results.get("extract_symptoms", {}).get("symptoms", [])
+        # Use parameter symptoms for rule matching, fallback to extracted
+        rule_symptoms = symptoms or extracted_symptoms_raw
         safety = tool_results.get("check_safety_flags", {})
         vitals_acuity = tool_results.get("vitals_acuity", {})
 
@@ -1953,8 +2093,47 @@ class TriageAgent:
 
             conditions.append(cond_entry)
 
+        # ── Wire reasoning rules into condition entries ───────────────────
+        top_codes = [c["condition_code"] for c in conditions if c.get("condition_code")]
+
+        # Referral triggers (830 STG rules)
+        if top_codes:
+            referral_map = get_referral_triggers(top_codes)
+            for cond in conditions:
+                cc = cond.get("condition_code", "")
+                if cc in referral_map:
+                    cond["referral_triggers"] = referral_map[cc]
+
+        # Severity classification (80 STG rules)
+        if top_codes and (vitals or rule_symptoms):
+            for cond in conditions:
+                cc = cond.get("condition_code", "")
+                sev = classify_severity(cc, vitals=vitals, symptoms=rule_symptoms)
+                if sev:
+                    cond["severity_classification"] = sev
+
+        # Lab threshold matching (57 STG rules)
+        if top_codes and labs:
+            lab_matches = match_lab_rules(labs, top_codes)
+            if lab_matches:
+                # Group by condition code
+                for lm in lab_matches:
+                    for cond in conditions:
+                        if cond.get("condition_code") == lm["confirms_code"]:
+                            cond.setdefault("lab_matches", []).append(lm)
+
+        # Vital threshold alerts (49 condition-specific rules)
+        if top_codes and vitals:
+            vital_alerts = check_vital_rules(vitals, top_codes)
+            if vital_alerts:
+                for va in vital_alerts:
+                    for cond in conditions:
+                        if cond.get("condition_code") == va["condition_code"]:
+                            cond.setdefault("vital_alerts", []).append(va)
+
+        extracted_symptoms = tool_results.get("extract_symptoms", {}).get("symptoms", [])
         result = {
-            "extracted_symptoms": symptoms,
+            "extracted_symptoms": extracted_symptoms,
             "acuity": acuity,
             "acuity_reasons": acuity_reasons,
             "acuity_sources": ["SATS (South African Triage Scale)"],
@@ -1971,6 +2150,34 @@ class TriageAgent:
             result["sats_priority"] = vitals_acuity.get("sats_priority", "")
             result["tews_score"] = vitals_acuity.get("tews_score", 0)
             result["sats_target_minutes"] = vitals_acuity.get("target_minutes", 240)
+
+        # Match quality: "Does the STG actually cover this presentation?"
+        from agents.scoring_config import (
+            STRONG_MATCH_THRESHOLD, PARTIAL_MATCH_THRESHOLD,
+            NO_CLEAR_MATCH_WARNING, PARTIAL_MATCH_WARNING,
+        )
+        top_adjusted = search_conditions[0].get("adjusted_score", 0) if search_conditions else 0
+
+        # Lab-confirmed or vitals-based presentations are always strong matches
+        has_lab = any(
+            "lab-confirmed" in f
+            for s in search_conditions[:1]
+            for f in s.get("matched_features", [])
+        )
+        has_vitals = any(
+            "vitals-based" in f
+            for s in search_conditions[:1]
+            for f in s.get("matched_features", [])
+        )
+
+        if has_lab or has_vitals or top_adjusted >= STRONG_MATCH_THRESHOLD:
+            result["match_quality"] = "strong_match"
+        elif top_adjusted >= PARTIAL_MATCH_THRESHOLD:
+            result["match_quality"] = "partial_match"
+            result["low_confidence_warning"] = PARTIAL_MATCH_WARNING
+        else:
+            result["match_quality"] = "no_clear_match"
+            result["low_confidence_warning"] = NO_CLEAR_MATCH_WARNING
 
         return result
 
@@ -2052,8 +2259,6 @@ class TriageAgent:
         always fire for the right demographic + complaint combination.
         The LLM is not relied upon to remember to ask them.
         """
-        from agents.scoring_config import GYNAE_COMPLAINT_KEYWORDS
-
         if not patient:
             return []
 
@@ -2065,10 +2270,11 @@ class TriageAgent:
             return []
 
         # Check if complaint is gynaecological
+        gynae_keywords = _cache.keyword_sets.get("gynae_complaint", set()) if _cache else set()
         complaint_lower = complaint.lower()
         symptoms_lower = " ".join(s.lower() for s in symptoms)
         combined = complaint_lower + " " + symptoms_lower
-        is_gynae = any(kw in combined for kw in GYNAE_COMPLAINT_KEYWORDS)
+        is_gynae = any(kw in combined for kw in gynae_keywords)
 
         if not is_gynae:
             return []
@@ -2126,15 +2332,19 @@ class TriageAgent:
 
         return questions
 
+    _VERB_PREFIXES = ("can't", "cannot", "unable", "difficulty", "trouble",
+                      "loss of", "no ", "not ", "absent")
+
     @staticmethod
     def _feature_to_question(feature_name: str, rel_type: str) -> str:
         """Convert a clinical feature name into a verification question."""
         name = feature_name.strip()
         if name.endswith("?"):
             return name
-        if rel_type == "RED_FLAG":
-            return f"Does the patient have {name}?"
-        return f"Is there any {name}?"
+        lower = name.lower()
+        if any(lower.startswith(v) for v in TriageAgent._VERB_PREFIXES):
+            return f"Does the patient report {name}?"
+        return f"Does the patient have {name}?"
 
     async def _generate_assessment_questions(
         self,
